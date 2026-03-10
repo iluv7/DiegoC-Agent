@@ -1,3 +1,5 @@
+# 本项目基于 [MiniMax-AI/Mini-Agent](https://github.com/MiniMax-AI/Mini-Agent) 二次开发，遵循 MIT 协议。
+
 # DiegoC Agent 使用指南 (macOS)
 
 > 从 GitHub 克隆本项目后，按照以下步骤配置和运行

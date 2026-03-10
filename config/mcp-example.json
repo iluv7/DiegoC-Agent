@@ -1,0 +1,50 @@
+{
+    "mcpServers": {
+        "memory": {
+            "description": "Memory - Knowledge graph memory system (long-term memory based on graph database)",
+            "type": "stdio",
+            "command": "npx",
+            "args": [
+                "-y",
+                "@modelcontextprotocol/server-memory"
+            ],
+            "disabled": true
+        },
+        "filesystem": {
+            "description": "Filesystem - Read and write files in specific directories",
+            "type": "stdio",
+            "command": "npx",
+            "args": [
+                "-y",
+                "@modelcontextprotocol/server-filesystem",
+                "/tmp"
+            ],
+            "disabled": true
+        },
+        "git": {
+            "description": "Git - Read, search, and manipulate Git repositories",
+            "type": "stdio",
+            "command": "npx",
+            "args": [
+                "-y",
+                "@modelcontextprotocol/server-git",
+                "--repository",
+                "."
+            ],
+            "disabled": false
+        },
+        "brave-search": {
+            "description": "Brave Search - Web search using Brave Search API",
+            "type": "stdio",
+            "command": "npx",
+            "args": [
+                "-y",
+                "@modelcontextprotocol/server-brave-search"
+            ],
+            "env": {
+                "BRAVE_API_KEY": "your-brave-api-key-here"
+            },
+            "disabled": true
+        }
+    }
+}

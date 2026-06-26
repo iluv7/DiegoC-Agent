@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"diegoc-agent/internal/permission"
 )
 
 // MCPTimeoutConfig holds timeouts for MCP operations.
@@ -109,6 +111,15 @@ func (t *MCPTool) Execute(ctx context.Context, args map[string]interface{}) (*To
 
 	return result, nil
 }
+
+// —— 权限 & 元数据 (HITL) ——
+
+func (t *MCPTool) CheckPermissions(args map[string]interface{}, pCtx *permission.Context) permission.Decision {
+	return permission.Decision{Behavior: permission.BehaviorPASSTHROUGH} // MCP 工具交给引擎处理
+}
+func (t *MCPTool) IsConcurrencySafe() bool { return true }
+func (t *MCPTool) IsReadOnly() bool        { return false }
+func (t *MCPTool) IsExternalTool() bool    { return false }
 
 // Connect establishes connection to the MCP server
 func (c *MCPConnection) Connect(ctx context.Context) error {

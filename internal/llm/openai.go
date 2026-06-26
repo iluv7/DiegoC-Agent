@@ -96,7 +96,7 @@ func (c *OpenAIClient) convertMessages(messages []schema.Message) []map[string]i
 			for _, tc := range msg.ToolCalls {
 				argBytes, _ := json.Marshal(tc.Function.Arguments)
 				tcs = append(tcs, map[string]interface{}{
-					"id": "tool_call_id", "type": "function",
+					"id": tc.ID, "type": "function",
 					"function": map[string]interface{}{"name": tc.Function.Name, "arguments": string(argBytes)},
 				})
 			}

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"diegoc-agent/internal/permission"
 )
 
 // RecordNoteTool records a session note to a JSON file.
@@ -107,6 +109,22 @@ func (t *RecallNoteTool) Parameters() map[string]interface{} {
 		},
 	}
 }
+
+// —— 权限 & 元数据 (HITL) ——
+
+func (t *RecordNoteTool) CheckPermissions(args map[string]interface{}, pCtx *permission.Context) permission.Decision {
+	return permission.Decision{Behavior: permission.BehaviorPASSTHROUGH} // 记录笔记是安全的
+}
+func (t *RecordNoteTool) IsConcurrencySafe() bool { return true }
+func (t *RecordNoteTool) IsReadOnly() bool        { return true }
+func (t *RecordNoteTool) IsExternalTool() bool    { return false }
+
+func (t *RecallNoteTool) CheckPermissions(args map[string]interface{}, pCtx *permission.Context) permission.Decision {
+	return permission.Decision{Behavior: permission.BehaviorPASSTHROUGH} // 纯读，永远安全
+}
+func (t *RecallNoteTool) IsConcurrencySafe() bool { return true }
+func (t *RecallNoteTool) IsReadOnly() bool        { return true }
+func (t *RecallNoteTool) IsExternalTool() bool    { return false }
 
 func (t *RecallNoteTool) Execute(ctx context.Context, args map[string]interface{}) (*ToolResult, error) {
 	data, err := os.ReadFile(t.MemoryFile)

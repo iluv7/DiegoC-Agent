@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 
+	"diegoc-agent/internal/permission"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -215,3 +217,12 @@ func (t *GetSkillTool) Execute(ctx context.Context, args map[string]interface{})
 	}
 	return &ToolResult{Success: true, Content: skill.ToPrompt()}, nil
 }
+
+// —— 权限 & 元数据 (HITL) ——
+
+func (t *GetSkillTool) CheckPermissions(args map[string]interface{}, pCtx *permission.Context) permission.Decision {
+	return permission.Decision{Behavior: permission.BehaviorALLOW} // 查看技能说明，永远安全
+}
+func (t *GetSkillTool) IsConcurrencySafe() bool { return true }
+func (t *GetSkillTool) IsReadOnly() bool        { return true }
+func (t *GetSkillTool) IsExternalTool() bool    { return false }

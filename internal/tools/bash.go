@@ -8,8 +8,11 @@ import (
 	"fmt"
 	"os/exec"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
+
+	"diegoc-agent/internal/permission"
 )
 
 var (
@@ -292,6 +295,93 @@ func (t *BashKillTool) Parameters() map[string]interface{} {
 		},
 		"required": []interface{}{"bash_id"},
 	}
+}
+
+// —— 权限 & 元数据 (HITL) ——
+
+func (t *BashTool) CheckPermissions(args map[string]interface{}, pCtx *permission.Context) permission.Decision {
+	cmd, _ := args["command"].(string)
+	if cmd == "" {
+		return permission.Decision{Behavior: permission.BehaviorDENY, Message: "命令不能为空"}
+	}
+	// EXPLORE 模式：只允许只读命令
+	if pCtx.Mode == permission.ModeExplore {
+		if isReadOnlyBash(cmd) {
+			return permission.Decision{Behavior: permission.BehaviorALLOW}
+		}
+		return permission.Decision{Behavior: permission.BehaviorDENY, Message: "EXPLORE 模式：禁止非只读命令"}
+	}
+	// 危险命令 → 必须确认
+	if isDangerousBash(cmd) {
+		return permission.Decision{Behavior: permission.BehaviorASK, Message: "潜在危险命令: " + cmd}
+	}
+	// 只读命令 → 自动允许
+	if isReadOnlyBash(cmd) {
+		return permission.Decision{Behavior: permission.BehaviorALLOW}
+	}
+	// 普通修改命令 → 交给引擎继续
+	return permission.Decision{Behavior: permission.BehaviorPASSTHROUGH}
+}
+
+func (t *BashTool) IsConcurrencySafe() bool { return false }
+func (t *BashTool) IsReadOnly() bool        { return false }
+func (t *BashTool) IsExternalTool() bool    { return false }
+
+func (t *BashOutputTool) CheckPermissions(args map[string]interface{}, pCtx *permission.Context) permission.Decision {
+	return permission.Decision{Behavior: permission.BehaviorALLOW} // 只读，永远允许
+}
+func (t *BashOutputTool) IsConcurrencySafe() bool { return true }
+func (t *BashOutputTool) IsReadOnly() bool        { return true }
+func (t *BashOutputTool) IsExternalTool() bool    { return false }
+
+func (t *BashKillTool) CheckPermissions(args map[string]interface{}, pCtx *permission.Context) permission.Decision {
+	// 终止后台进程需要确认
+	return permission.Decision{Behavior: permission.BehaviorASK, Message: "终止后台命令需要确认"}
+}
+func (t *BashKillTool) IsConcurrencySafe() bool { return true }
+func (t *BashKillTool) IsReadOnly() bool        { return false }
+func (t *BashKillTool) IsExternalTool() bool    { return false }
+
+// ——— 只读命令 & 危险命令检查 ———
+
+var readOnlyCmds = []string{
+	"ls", "cat", "head", "tail", "wc", "du", "df",
+	"find", "grep", "awk", "sed -n", "sort", "uniq",
+	"git status", "git log", "git diff", "git branch",
+	"docker ps", "docker images", "docker logs",
+	"echo", "date", "whoami", "pwd", "env", "which",
+	"ps", "top", "htop", "free", "uptime", "uname",
+}
+
+var dangerousCmds = []string{
+	"rm -rf /", "rm -rf ~", "rm -rf .", "rm -rf /*",
+	"sudo rm", "dd if=", "mkfs.",
+	"chmod 777 /", "chown -R /",
+	"> /dev/sda", "> /dev/null",
+	"fork bomb", ":(){",
+}
+
+func init() {
+	// 导入 permission 包不需要额外初始化
+	_ = readOnlyCmds
+}
+
+func isReadOnlyBash(cmd string) bool {
+	for _, ro := range readOnlyCmds {
+		if strings.Contains(cmd, ro) {
+			return true
+		}
+	}
+	return false
+}
+
+func isDangerousBash(cmd string) bool {
+	for _, dc := range dangerousCmds {
+		if strings.Contains(cmd, dc) {
+			return true
+		}
+	}
+	return false
 }
 
 func (t *BashKillTool) Execute(ctx context.Context, args map[string]interface{}) (*ToolResult, error) {

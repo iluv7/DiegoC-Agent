@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"bufio"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"diegoc-agent/internal/config"
 	"diegoc-agent/internal/logger"
 	"diegoc-agent/internal/llm"
+	"diegoc-agent/internal/permission"
 	"diegoc-agent/internal/schema"
 	"diegoc-agent/internal/tools"
 
@@ -45,7 +47,6 @@ func init() {
 
 func main() {
 	workspace := flag.String("workspace", "", "Workspace directory (default: current directory)")
-	task := flag.String("task", "", "Run a single task non-interactively and exit")
 	showVersion := flag.Bool("version", false, "Show version")
 	flag.Parse()
 
@@ -118,28 +119,8 @@ func main() {
 	workspaceInfo := "\n\n## Current Workspace\nYou are working in: `" + workspaceDir + "`\n"
 	systemPrompt += workspaceInfo
 	ag := agent.New(client, systemPrompt, cfg.Agent.MaxSteps, cfg.Agent.TokenLimit, toolList)
-	agentLogger := logger.New()
+		agentLogger := logger.New()
 	ag.Logger = agentLogger
-
-	if *task != "" {
-		ag.AddUserMessage(*task)
-		if path := agentLogger.GetLogFilePath(); path != "" {
-			fmt.Fprintf(os.Stderr, "Log file: %s\n", path)
-		}
-		ctx := context.Background()
-		out, err := ag.Run(ctx)
-		if err != nil {
-			var retryErr *llm.RetryExhaustedError
-			if errors.As(err, &retryErr) {
-				fmt.Fprintf(os.Stderr, "%s❌ LLM call failed after %d retries\nLast error: %v%s\n", cRed, retryErr.Attempts, retryErr.LastErr, cReset)
-			} else {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			}
-			os.Exit(1)
-		}
-		fmt.Println(formatMarkdownForTerminal(out))
-		return
-	}
 
 	runInteractive(ag, workspaceDir, agentLogger)
 }
@@ -384,31 +365,116 @@ func runInteractive(ag *agent.Agent, workspaceDir string, agentLogger *logger.Ag
 		ag.AddUserMessage(line)
 		fmt.Println("\nAgent › Thinking... (Esc to cancel)")
 		ctx, cancel := context.WithCancel(context.Background())
-		done := make(chan struct{})
+
+		// HITL 通道
+		hitlReqCh := make(chan permission.HITLConfirmRequest, 1)
+		hitlRespCh := make(chan permission.HITLConfirmResponse, 1)
+
+		// Esc 取消监听
+		escDone := make(chan struct{})
 		go func() {
-			runWithEscCancel(ctx, cancel, done)
+			runWithEscCancel(ctx, cancel, escDone)
 		}()
-		out, err := ag.Run(ctx)
+
+		// Agent 跑在另一个 goroutine
+		type agentResult struct {
+			out string
+			err error
+		}
+		agentDone := make(chan agentResult, 1)
+		go func() {
+			out, err := ag.RunWithHITL(ctx, hitlRespCh, hitlReqCh)
+			agentDone <- agentResult{out, err}
+		}()
+
+		// 主循环：处理 Agent 的 HITL 请求或等待完成
+		var out string
+		var runErr error
+	agentLoop:
+		for {
+			select {
+				case req := <-hitlReqCh:
+					for _, tc := range req.ToolCalls {
+						fmt.Printf("\n%s⚠️  Agent wants to run: %s%s%s%s\n", cBrightYellow, cBold, cBrightCyan, tc.Name, cReset)
+						fmt.Printf("   Args: %v\n", tc.Args)
+
+						fmt.Printf("   %s[y=yes / a=always allow / n=no]%s ", cDim, cReset)
+						reader := bufio.NewReader(os.Stdin)
+						text, _ := reader.ReadString('\n')
+						answer := strings.TrimSpace(strings.ToLower(text))
+
+						switch {
+						case answer == "y" || answer == "yes":
+							// 只这次允许
+							hitlRespCh <- permission.HITLConfirmResponse{
+								ReplyID: req.ReplyID,
+								Results: []permission.ToolConfirmResult{{
+									ToolCall:  tc,
+									Confirmed: true,
+								}},
+							}
+							fmt.Printf("   %s✅ Allowed (this time)%s\n", cGreen, cReset)
+
+						case answer == "a" || answer == "always":
+							// 永远允许 → 生成规则
+							rules := makeAllowRule(tc)
+							hitlRespCh <- permission.HITLConfirmResponse{
+								ReplyID: req.ReplyID,
+								Results: []permission.ToolConfirmResult{{
+									ToolCall:  tc,
+									Confirmed: true,
+									Rules:     rules,
+								}},
+							}
+							fmt.Printf("   %s✅ Allowed (always)%s\n", cGreen, cReset)
+							if len(rules) > 0 {
+								fmt.Printf("   %s📌 Rule added: %s %s → %s%s\n",
+									cDim, rules[0].ToolName, rules[0].RuleContent, rules[0].Behavior, cReset)
+							}
+
+						default:
+							// n 或任何其他 → 拒绝
+							hitlRespCh <- permission.HITLConfirmResponse{
+								ReplyID: req.ReplyID,
+								Results: []permission.ToolConfirmResult{{
+									ToolCall:  tc,
+									Confirmed: false,
+								}},
+							}
+							fmt.Printf("   %s❌ Denied%s\n", cRed, cReset)
+						}
+					}
+
+			case result := <-agentDone:
+				out = result.out
+				runErr = result.err
+				break agentLoop
+
+			case <-ctx.Done():
+				break agentLoop
+			}
+		}
+
 		cancel()
-		<-done
-		if err != nil {
-			if err == context.Canceled {
+		<-escDone
+
+		if runErr != nil {
+			if runErr == context.Canceled {
 				fmt.Printf("\n%s⚠️  Cancelled by user (Esc).%s\n", cBrightYellow, cReset)
 			} else {
 				var retryErr *llm.RetryExhaustedError
-				if errors.As(err, &retryErr) {
+				if errors.As(runErr, &retryErr) {
 					fmt.Fprintf(os.Stderr, "%s❌ LLM call failed after %d retries\nLast error: %v%s\n", cRed, retryErr.Attempts, retryErr.LastErr, cReset)
 				} else {
-					fmt.Fprintf(os.Stderr, "%s❌ Error: %v%s\n", cRed, err, cReset)
+					fmt.Fprintf(os.Stderr, "%s❌ Error: %v%s\n", cRed, runErr, cReset)
 				}
 			}
-		} else {
+		} else if out != "" {
 			fmt.Printf("\n%s🤖 Agent%s %s›%s\n%s\n", cBold, cReset, cDim, cReset, formatMarkdownForTerminal(out))
 		}
 		if path := agentLogger.GetLogFilePath(); path != "" {
 			fmt.Printf("\n%s📝 Log file: %s%s%s\n", cDim, cReset, path, cReset)
 		}
-		fmt.Printf("\n%s%s\n\n", cDim, strings.Repeat("─", 60)+cReset)
 		if line != "" {
 			state.AppendHistory(line)
 		}
@@ -603,3 +669,48 @@ func stdinFile() (*os.File, bool) {
 	return f, true
 }
 
+
+// makeAllowRule 根据工具调用生成"始终允许"规则。
+func makeAllowRule(tc permission.PendingToolCall) []permission.Rule {
+	switch tc.Name {
+	case "bash":
+		cmd, _ := tc.Args["command"].(string)
+		if cmd == "" {
+			return nil
+		}
+		return []permission.Rule{{
+			ToolName:    "bash",
+			RuleContent: cmd,
+			Behavior:    permission.BehaviorALLOW,
+			Source:      "userConfirm",
+		}}
+	case "write_file", "edit_file":
+		path, _ := tc.Args["path"].(string)
+		if path == "" {
+			return nil
+		}
+		return []permission.Rule{{
+			ToolName:    tc.Name,
+			RuleContent: filepath.Dir(path) + "/**",
+			Behavior:    permission.BehaviorALLOW,
+			Source:      "userConfirm",
+		}}
+	case "read_file":
+		path, _ := tc.Args["path"].(string)
+		if path == "" {
+			return nil
+		}
+		return []permission.Rule{{
+			ToolName:    "read_file",
+			RuleContent: filepath.Dir(path) + "/**",
+			Behavior:    permission.BehaviorALLOW,
+			Source:      "userConfirm",
+		}}
+	default:
+		return []permission.Rule{{
+			ToolName: tc.Name,
+			Behavior: permission.BehaviorALLOW,
+			Source:   "userConfirm",
+		}}
+	}
+}

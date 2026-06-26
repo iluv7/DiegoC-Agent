@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"diegoc-agent/internal/permission"
 )
 
 // truncateByTokens keeps head and tail of text to stay under roughly maxTokens (char/4 approx).
@@ -101,17 +103,6 @@ func (t *ReadTool) Execute(ctx context.Context, args map[string]interface{}) (*T
 	return &ToolResult{Success: true, Content: content}, nil
 }
 
-func toInt(v interface{}) (int, bool) {
-	switch x := v.(type) {
-	case int:
-		return x, true
-	case float64:
-		return int(x), true
-	default:
-		return 0, false
-	}
-}
-
 // WriteTool writes content to a file.
 type WriteTool struct {
 	WorkspaceDir string
@@ -205,4 +196,96 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]interface{}) (*T
 		return &ToolResult{Success: false, Error: err.Error()}, nil
 	}
 	return &ToolResult{Success: true, Content: "Successfully edited " + fullPath}, nil
+}
+
+// ====== 权限 & 元数据 (HITL) ======
+
+func (t *ReadTool) CheckPermissions(args map[string]interface{}, pCtx *permission.Context) permission.Decision {
+	return permission.Decision{Behavior: permission.BehaviorPASSTHROUGH} // 纯读，交给引擎
+}
+func (t *ReadTool) IsConcurrencySafe() bool { return true }
+func (t *ReadTool) IsReadOnly() bool        { return true }
+func (t *ReadTool) IsExternalTool() bool    { return false }
+
+func (t *WriteTool) CheckPermissions(args map[string]interface{}, pCtx *permission.Context) permission.Decision {
+	pathArg, _ := args["path"].(string)
+	if pathArg == "" {
+		return permission.Decision{Behavior: permission.BehaviorDENY, Message: "路径不能为空"}
+	}
+	absPath := pathArg
+	if !filepath.IsAbs(pathArg) {
+		absPath = filepath.Join(t.WorkspaceDir, pathArg)
+	}
+	for _, dp := range dangerousPaths {
+		if strings.Contains(absPath, dp) {
+			return permission.Decision{
+				Behavior: permission.BehaviorASK,
+				Message:  "写入目标可能是危险路径: " + absPath,
+				SuggestedRules: []permission.Rule{{
+					ToolName:    "write_file",
+					RuleContent: filepath.Dir(absPath) + "/**",
+					Behavior:    permission.BehaviorALLOW,
+					Source:      "suggestion",
+				}},
+			}
+		}
+	}
+	if pCtx.Mode == permission.ModeExplore {
+		return permission.Decision{Behavior: permission.BehaviorDENY, Message: "EXPLORE 模式：禁止写操作"}
+	}
+	return permission.Decision{Behavior: permission.BehaviorPASSTHROUGH}
+}
+func (t *WriteTool) IsConcurrencySafe() bool { return false }
+func (t *WriteTool) IsReadOnly() bool        { return false }
+func (t *WriteTool) IsExternalTool() bool    { return false }
+
+func (t *EditTool) CheckPermissions(args map[string]interface{}, pCtx *permission.Context) permission.Decision {
+	pathArg, _ := args["path"].(string)
+	if pathArg == "" {
+		return permission.Decision{Behavior: permission.BehaviorDENY, Message: "路径不能为空"}
+	}
+	absPath := pathArg
+	if !filepath.IsAbs(pathArg) {
+		absPath = filepath.Join(t.WorkspaceDir, pathArg)
+	}
+	for _, dp := range dangerousPaths {
+		if strings.Contains(absPath, dp) {
+			return permission.Decision{
+				Behavior: permission.BehaviorASK,
+				Message:  "编辑目标可能是危险路径: " + absPath,
+				SuggestedRules: []permission.Rule{{
+					ToolName:    "edit_file",
+					RuleContent: filepath.Dir(absPath) + "/**",
+					Behavior:    permission.BehaviorALLOW,
+					Source:      "suggestion",
+				}},
+			}
+		}
+	}
+	if pCtx.Mode == permission.ModeExplore {
+		return permission.Decision{Behavior: permission.BehaviorDENY, Message: "EXPLORE 模式：禁止编辑操作"}
+	}
+	return permission.Decision{Behavior: permission.BehaviorPASSTHROUGH}
+}
+func (t *EditTool) IsConcurrencySafe() bool { return false }
+func (t *EditTool) IsReadOnly() bool        { return false }
+func (t *EditTool) IsExternalTool() bool    { return false }
+
+// dangerousPaths 是需要用户确认的危险文件路径
+var dangerousPaths = []string{
+	"/etc/passwd", "/etc/shadow", "/etc/sudoers",
+	".ssh/", ".bashrc", ".zshrc", ".profile",
+	"/boot/", "/System/", "/Library/",
+	".git/config",
+}
+
+func toInt(v interface{}) (int, bool) {
+	switch x := v.(type) {
+	case int:
+		return x, true
+	case float64:
+		return int(x), true
+	default:
+		return 0, false
+	}
 }

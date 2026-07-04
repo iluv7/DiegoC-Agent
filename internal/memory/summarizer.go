@@ -158,18 +158,17 @@ func (s *Summarizer) systemPrompt(today string) string {
 				"   - 如果涉及全新主题 → 在文件末尾追加新章节\n"+
 				"   - 如果信息不再准确 → 删除或更新对应段落\n\n"+
 				"## 记忆文件格式\n"+
-				"每个主题使用 ## 二级标题，内容用要点（-）组织，保持简洁。示例：\n\n"+
+				"文件必须以 YAML frontmatter 开头标记会话日期，每条事实以 **YYYY-MM-DD**: 开头。示例：\n\n"+
+				"---\nconversation_date: "+today+"\n---\n\n"+
 				"## 项目目标\n"+
-				"- 构建 DiegoC Agent 框架，支持多模型、多工具\n"+
-				"- 目标部署环境：macOS / Linux 服务器\n\n"+
+				"- **"+today+"**: 构建 DiegoC Agent 框架\n\n"+
 				"## 关键决策\n"+
-				"- 2026-07-01: 选择 ChromaDB 作为向量存储后端\n"+
-				"- 2026-07-01: 确定使用 memory/YYYY-MM-DD.md 按天拆分\n\n"+
+				"- **"+today+"**: 选择 ChromaDB 作为向量存储后端\n\n"+
 				"## 注意事项\n"+
+				"- 每条事实必须以 **YYYY-MM-DD**: 开头，明确事件日期\n"+
+				"- 禁止使用\"最近\"、\"前几天\"、\"上次\"等模糊时间词\n"+
 				"- 保留确切的文件路径、函数名称、配置项\n"+
-				"- 每条重要信息标上日期\n"+
-				"- 不要重复已存在的内容\n"+
-				"- 输出只包含记忆文件内容本身，不要加额外解释",
+				"- 输出只包含 frontmatter + 记忆文件内容",
 			today, today)
 	}
 	return fmt.Sprintf(
@@ -184,18 +183,17 @@ func (s *Summarizer) systemPrompt(today string) string {
 			"   - Entirely new topics → append a new section at the end of the file\n"+
 			"   - Information no longer accurate → delete or update the relevant section\n\n"+
 			"## Memory File Format\n"+
-			"Use ## level-2 headings for each topic, bullet points (-) for details. Keep it concise. Example:\n\n"+
+			"File MUST start with YAML frontmatter. Every fact MUST start with **YYYY-MM-DD**: prefix.\n\n"+
+			"---\nconversation_date: "+today+"\n---\n\n"+
 			"## Project Goals\n"+
-			"- Build DiegoC Agent framework supporting multiple models and tools\n"+
-			"- Target deployment: macOS / Linux servers\n\n"+
+			"- **"+today+"**: Build DiegoC Agent framework\n\n"+
 			"## Key Decisions\n"+
-			"- 2026-07-01: Chose ChromaDB as vector storage backend\n"+
-			"- 2026-07-01: Decided on memory/YYYY-MM-DD.md daily split\n\n"+
+			"- **"+today+"**: Chose ChromaDB as vector storage backend\n\n"+
 			"## Important Notes\n"+
+			"- Every fact MUST start with **YYYY-MM-DD**: prefix\n"+
+			"- NEVER use relative time like \"recently\", \"last week\", \"before\"\n"+
 			"- Preserve exact file paths, function names, and configuration values\n"+
-			"- Date each important piece of information\n"+
-			"- Don't duplicate content that already exists\n"+
-			"- Output only the memory file content itself — no extra commentary",
+			"- Output only frontmatter + memory file content — no extra commentary",
 		today, today)
 }
 

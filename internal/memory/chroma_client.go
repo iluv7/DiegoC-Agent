@@ -68,13 +68,18 @@ func (c *ChromaClient) Upsert(ctx context.Context, collection string, chunks []M
 	for i, ch := range chunks {
 		ids[i] = ch.ID
 		documents[i] = ch.Text
-		metadatas[i] = map[string]interface{}{
+		meta := map[string]interface{}{
 			"path":       ch.Path,
 			"source":     ch.Source,
 			"start_line": ch.StartLine,
 			"end_line":   ch.EndLine,
 			"hash":       ch.Hash,
 		}
+		// Phase 8c: 时间元数据锚定
+		if ch.ConversationDate != "" {
+			meta["conversation_date"] = ch.ConversationDate
+		}
+		metadatas[i] = meta
 		if i < len(embeddings) {
 			embeds[i] = embeddings[i]
 		}
@@ -110,7 +115,9 @@ func (c *ChromaClient) Query(ctx context.Context, collection string, queryEmbedd
 		"include":          []string{"documents", "metadatas", "distances"},
 	}
 	if where != nil {
-		body["where_document"] = where
+		// Phase 8c: 元数据过滤（如 conversation_date）
+		// ChromaDB 的 where 用于 metadata 过滤
+		body["where"] = where
 	}
 
 	url := fmt.Sprintf("%s/api/v2/tenants/%s/databases/%s/collections/%s/query",
@@ -290,6 +297,10 @@ func (c *ChromaClient) parseQueryResults(data []byte) []SearchResult {
 			r.Path, _ = batchMeta[i]["path"].(string)
 			r.StartLine, _ = toIntFromMeta(batchMeta[i]["start_line"])
 			r.EndLine, _ = toIntFromMeta(batchMeta[i]["end_line"])
+			// Phase 8c: 从 ChromaDB metadata 还原日期标签
+			if date, ok := batchMeta[i]["conversation_date"].(string); ok && date != "" {
+				r.DateLabel = date
+			}
 		}
 		if i < len(batchDist) {
 			r.Score = distanceToSimilarity(batchDist[i])

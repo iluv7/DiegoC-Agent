@@ -220,7 +220,11 @@ func (fs *FileStore) VectorSearch(ctx context.Context, query string, limit int) 
 	if err != nil {
 		return nil, fmt.Errorf("filestore: embed query: %w", err)
 	}
-	return fs.vecStore.Query(ctx, fs.collection, vec, limit, nil)
+	results, err := fs.vecStore.Query(ctx, fs.collection, vec, limit, nil)
+	if err != nil {
+		return nil, err
+	}
+	return FormatDateLabels(results), nil
 }
 
 // KeywordSearch 纯 BM25 关键词搜索。
@@ -284,7 +288,8 @@ func (fs *FileStore) HybridSearch(ctx context.Context, query string, limit int) 
 		merged = merged[:limit]
 	}
 
-	return merged, nil
+	// Phase 8c: 添加日期标签
+	return FormatDateLabels(merged), nil
 }
 
 // ---- RRF 合并 ----
@@ -445,4 +450,169 @@ func ParseFrontmatter(content string) (conversationDate string, body string) {
 		}
 	}
 	return conversationDate, body
+}
+
+// ---- Phase 8c: 时间感知搜索 ----
+
+// datePattern 匹配 YYYY-MM-DD 格式的日期。
+// 放在包级别供 extractDateConstraint 使用。
+
+// ExtractDateConstraint 从查询文本中提取日期约束。
+// 支持：
+//   - 绝对日期：YYYY-MM-DD、YYYY/MM/DD
+//   - 相对日期：today、yesterday、"last week"、"this month"
+//   - 中文日期：今天、昨天、上周、本月、最近
+//
+// 返回：日期字符串（YYYY-MM-DD 格式）和是否有时间过滤。
+func ExtractDateConstraint(query string) (date string, hasFilter bool) {
+	// 尝试匹配 YYYY-MM-DD 或 YYYY/MM/DD
+	for i := 0; i < len(query)-9; i++ {
+		sub := query[i : i+10]
+		// YYYY-MM-DD
+		if isDatePattern(sub, '-') {
+			return sub, true
+		}
+		// YYYY/MM/DD
+		if isDatePattern(sub, '/') {
+			return sub[:4] + "-" + sub[5:7] + "-" + sub[8:10], true
+		}
+	}
+
+	lower := strings.ToLower(query)
+
+	// 英文相对日期
+	if strings.Contains(lower, "today") {
+		return "", true // 需要由调用方注入当前日期
+	}
+	if strings.Contains(lower, "yesterday") {
+		return "", true
+	}
+	if strings.Contains(lower, "last week") || strings.Contains(lower, "this week") {
+		return "", true
+	}
+	if strings.Contains(lower, "last month") || strings.Contains(lower, "this month") {
+		return "", true
+	}
+
+	// 中文相对日期
+	if strings.Contains(query, "今天") {
+		return "", true
+	}
+	if strings.Contains(query, "昨天") {
+		return "", true
+	}
+	if strings.Contains(query, "上周") || strings.Contains(query, "本周") {
+		return "", true
+	}
+	if strings.Contains(query, "上月") || strings.Contains(query, "本月") {
+		return "", true
+	}
+	if strings.Contains(query, "最近") {
+		return "", true
+	}
+
+	return "", false
+}
+
+// isDatePattern 检查 "YYYY-MM-DD" 或 "YYYY/MM/DD" 格式。
+func isDatePattern(s string, sep byte) bool {
+	if len(s) != 10 {
+		return false
+	}
+	if s[4] != sep || s[7] != sep {
+		return false
+	}
+	for _, i := range []int{0, 1, 2, 3, 5, 6, 8, 9} {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// BuildDateMetadataFilter 构建 ChromaDB metadata where 过滤条件。
+// date 是 YYYY-MM-DD 格式的具体日期。
+func BuildDateMetadataFilter(date string) map[string]interface{} {
+	if date == "" {
+		return nil
+	}
+	return map[string]interface{}{
+		"conversation_date": date,
+	}
+}
+
+// FormatDateLabels 为搜索结果添加日期标签前缀。
+// 如果 SearchResult.DateLabel 非空，在 Text 前面加上 [YYYY-MM-DD] 前缀。
+// 对已含前缀的结果不重复添加。
+func FormatDateLabels(results []SearchResult) []SearchResult {
+	formatted := make([]SearchResult, len(results))
+	for i, r := range results {
+		formatted[i] = r
+		if r.DateLabel != "" && !strings.HasPrefix(r.Text, "["+r.DateLabel+"]") {
+			formatted[i].Text = "[" + r.DateLabel + "] " + r.Text
+		}
+	}
+	return formatted
+}
+
+// HybridSearchWithDate 与 HybridSearch 相同，但额外按日期过滤。
+// 先尝试从 query 中提取日期约束，若有则在向量搜索时应用 metadata where 过滤。
+func (fs *FileStore) HybridSearchWithDate(ctx context.Context, query string, limit int) ([]SearchResult, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+	fetchLimit := limit * 3
+
+	// 提取日期约束
+	date, hasDateFilter := ExtractDateConstraint(query)
+
+	var vecResults, kwResults []SearchResult
+	var vecErr, kwErr error
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		vec, err := fs.embedder.Embed(ctx, query)
+		if err != nil {
+			vecErr = err
+			return
+		}
+		var where map[string]interface{}
+		if hasDateFilter && date != "" {
+			where = BuildDateMetadataFilter(date)
+		}
+		vecResults, vecErr = fs.vecStore.Query(ctx, fs.collection, vec, fetchLimit, where)
+	}()
+
+	go func() {
+		defer wg.Done()
+		kwResults, kwErr = fs.kwStore.Search(ctx, query, fetchLimit)
+	}()
+
+	wg.Wait()
+
+	// 一路失败 → 退回另一路
+	if vecErr != nil && kwErr != nil {
+		return nil, fmt.Errorf("filestore: hybrid with date both failed: vec=%v kw=%v", vecErr, kwErr)
+	}
+	if vecErr != nil {
+		return FormatDateLabels(kwResults), nil
+	}
+	if kwErr != nil {
+		return FormatDateLabels(vecResults), nil
+	}
+
+	// RRF 合并
+	merged := rrfMerge(vecResults, kwResults, 60)
+
+	// 排序取 top-N
+	sort.Slice(merged, func(i, j int) bool {
+		return merged[i].Score > merged[j].Score
+	})
+	if len(merged) > limit {
+		merged = merged[:limit]
+	}
+
+	return FormatDateLabels(merged), nil
 }

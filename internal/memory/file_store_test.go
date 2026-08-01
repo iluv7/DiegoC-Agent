@@ -56,13 +56,21 @@ func (s *mockVectorStore) Upsert(_ context.Context, _ string, chunks []MemoryChu
 	return nil
 }
 
-func (s *mockVectorStore) Query(_ context.Context, _ string, queryEmbedding []float32, nResults int, _ map[string]interface{}) ([]SearchResult, error) {
+func (s *mockVectorStore) Query(_ context.Context, _ string, queryEmbedding []float32, nResults int, where map[string]interface{}) ([]SearchResult, error) {
+	// Phase 8c: 按 conversation_date 过滤
+	dateFilter, _ := where["conversation_date"].(string)
+
 	type scored struct {
 		id    string
 		score float64
 	}
 	var scoredChunks []scored
 	for id, vec := range s.vecs {
+		c := s.chunks[id]
+		// 日期过滤
+		if dateFilter != "" && c.ConversationDate != "" && c.ConversationDate != dateFilter {
+			continue
+		}
 		sim := cosineSimilarity(queryEmbedding, vec)
 		scoredChunks = append(scoredChunks, scored{id: id, score: sim})
 	}
@@ -87,6 +95,7 @@ func (s *mockVectorStore) Query(_ context.Context, _ string, queryEmbedding []fl
 			EndLine:   c.EndLine,
 			Text:      c.Text,
 			Score:     scoredChunks[i].score,
+			DateLabel: c.ConversationDate,
 		}
 	}
 	return results, nil
@@ -122,6 +131,7 @@ func (s *mockKeywordStore) IndexChunks(_ context.Context, chunks []MemoryChunk) 
 			StartLine: c.StartLine,
 			EndLine:   c.EndLine,
 			Text:      c.Text,
+			DateLabel: c.ConversationDate,
 		}
 	}
 	return nil
@@ -470,5 +480,266 @@ func TestToFTS5Query(t *testing.T) {
 	q := toFTS5Query("build agent")
 	if !strings.Contains(q, "AND") {
 		t.Errorf("multi-word should use AND: %q", q)
+	}
+}
+
+// ---- Phase 8c: Time Metadata Anchoring Tests ----
+
+func TestExtractDateConstraint_Absolute(t *testing.T) {
+	tests := []struct {
+		query      string
+		wantDate   string
+		wantFilter bool
+	}{
+		{"What happened on 2026-07-04?", "2026-07-04", true},
+		{"changes from 2025/12/01", "2025-12-01", true},
+		{"find decisions from 2024-01-15 about architecture", "2024-01-15", true},
+		{"no date mentioned here", "", false},
+		{"version 2.0 released 2023-06-30", "2023-06-30", true},
+	}
+
+	for _, tt := range tests {
+		date, hasFilter := ExtractDateConstraint(tt.query)
+		if date != tt.wantDate {
+			t.Errorf("ExtractDateConstraint(%q): date = %q, want %q", tt.query, date, tt.wantDate)
+		}
+		if hasFilter != tt.wantFilter {
+			t.Errorf("ExtractDateConstraint(%q): hasFilter = %v, want %v", tt.query, hasFilter, tt.wantFilter)
+		}
+	}
+}
+
+func TestExtractDateConstraint_Relative(t *testing.T) {
+	// 相对时间：返回空日期但 hasFilter=true
+	relQueries := []string{
+		"what did we discuss today",
+		"yesterday's decisions",
+		"last week summary",
+		"this month goals",
+		"今天讨论了什么",
+		"昨天的决策",
+		"上周的工作",
+		"最近的项目进展",
+		"本月的计划",
+	}
+
+	for _, q := range relQueries {
+		date, hasFilter := ExtractDateConstraint(q)
+		if !hasFilter {
+			t.Errorf("ExtractDateConstraint(%q): expected hasFilter=true", q)
+		}
+		if date != "" {
+			t.Errorf("ExtractDateConstraint(%q): relative date should return empty string, got %q", q, date)
+		}
+	}
+}
+
+func TestExtractDateConstraint_InvalidDate(t *testing.T) {
+	// 不符合日期格式的数字不应被提取
+	invalidQueries := []string{
+		"version 2.0.1 released",
+		"port 8080 timeout",
+		"size is 1234-5678-90",
+	}
+
+	for _, q := range invalidQueries {
+		_, hasFilter := ExtractDateConstraint(q)
+		if hasFilter {
+			t.Errorf("ExtractDateConstraint(%q): expected hasFilter=false for invalid date", q)
+		}
+	}
+}
+
+func TestBuildDateMetadataFilter(t *testing.T) {
+	filter := BuildDateMetadataFilter("2026-07-04")
+	if filter == nil {
+		t.Fatal("filter should not be nil")
+	}
+	if filter["conversation_date"] != "2026-07-04" {
+		t.Errorf("conversation_date = %v", filter["conversation_date"])
+	}
+
+	// 空日期返回 nil
+	if BuildDateMetadataFilter("") != nil {
+		t.Error("empty date should return nil")
+	}
+}
+
+func TestFormatDateLabels(t *testing.T) {
+	results := []SearchResult{
+		{ID: "a", Text: "Build agent with Go", DateLabel: "2026-07-04"},
+		{ID: "b", Text: "Use ChromaDB for vectors", DateLabel: ""},
+		{ID: "c", Text: "[2026-07-05] Already has prefix", DateLabel: "2026-07-05"},
+	}
+
+	formatted := FormatDateLabels(results)
+
+	// 有 DateLabel → 加前缀
+	if !strings.HasPrefix(formatted[0].Text, "[2026-07-04]") {
+		t.Errorf("expected date prefix, got: %s", formatted[0].Text)
+	}
+	// 无 DateLabel → 不变
+	if formatted[1].Text != "Use ChromaDB for vectors" {
+		t.Errorf("expected unchanged text, got: %s", formatted[1].Text)
+	}
+	// 已有前缀 → 不重复
+	if formatted[2].Text != "[2026-07-05] Already has prefix" {
+		t.Errorf("expected no duplicate prefix, got: %s", formatted[2].Text)
+	}
+}
+
+func TestFileStore_IndexFileWithDate_DateLabel(t *testing.T) {
+	fs := NewFileStore(&mockEmbedder{dim: 8}, newMockVectorStore(), newMockKeywordStore(),
+		&RuleTokenCounter{Divisor: 3.75}, "test_date_label", 100, 20)
+
+	ctx := context.Background()
+
+	// 给多个日期的文件建索引
+	_ = fs.IndexFileWithDate(ctx, "memory/2026-07-01.md", "## Initial\nProject started", "2026-07-01")
+	_ = fs.IndexFileWithDate(ctx, "memory/2026-07-04.md", "## Architecture\nUsing ChromaDB for memory storage", "2026-07-04")
+
+	// 搜索应返回带 DateLabel 的结果
+	results, err := fs.HybridSearch(ctx, "ChromaDB", 5)
+	if err != nil {
+		t.Fatalf("HybridSearch: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected results")
+	}
+	// 搜索结果应该包含日期标签前缀
+	for _, r := range results {
+		if r.DateLabel != "" && !strings.HasPrefix(r.Text, "["+r.DateLabel+"]") {
+			t.Errorf("result should have date prefix: DateLabel=%q, Text=%q", r.DateLabel, r.Text)
+		}
+	}
+}
+
+func TestFileStore_Integration_DateMetadataFlow(t *testing.T) {
+	// 端到端测试：IndexFileWithDate → VectorSearch/KeywordSearch/HybridSearch 都有 DateLabel
+	fs := NewFileStore(&mockEmbedder{dim: 8}, newMockVectorStore(), newMockKeywordStore(),
+		&RuleTokenCounter{Divisor: 3.75}, "test_date_flow", 200, 40)
+
+	ctx := context.Background()
+
+	content := "---\nconversation_date: 2026-07-15\n---\n## Architecture Decision\nUse microservices with Go."
+	date, body := ParseFrontmatter(content)
+	if date != "2026-07-15" {
+		t.Fatalf("ParseFrontmatter: date = %q", date)
+	}
+
+	err := fs.IndexFileWithDate(ctx, "memory/2026-07-15.md", body, date)
+	if err != nil {
+		t.Fatalf("IndexFileWithDate: %v", err)
+	}
+
+	// 验证 meta
+	meta := fs.GetFileMeta("memory/2026-07-15.md")
+	if meta == nil {
+		t.Fatal("meta should exist")
+	}
+	if meta.ConversationDate != "2026-07-15" {
+		t.Errorf("meta.ConversationDate = %q", meta.ConversationDate)
+	}
+
+	// Vector search should get DateLabel
+	vecRes, _ := fs.VectorSearch(ctx, "microservices", 3)
+	if len(vecRes) == 0 {
+		t.Fatal("vector search: no results")
+	}
+	hasDateLabel := false
+	for _, r := range vecRes {
+		if r.DateLabel != "" {
+			hasDateLabel = true
+			break
+		}
+	}
+	if !hasDateLabel {
+		t.Error("vector search results should have DateLabel")
+	}
+
+	// Hybrid search should get DateLabel too
+	hyRes, _ := fs.HybridSearch(ctx, "Go microservices", 3)
+	if len(hyRes) == 0 {
+		t.Fatal("hybrid search: no results")
+	}
+	for _, r := range hyRes {
+		if r.DateLabel != "" && !strings.HasPrefix(r.Text, "["+r.DateLabel+"]") {
+			t.Errorf("hybrid result Text should have date prefix: got %q, DateLabel=%q", r.Text, r.DateLabel)
+		}
+	}
+}
+
+func TestFileStore_DateFilter_Search(t *testing.T) {
+	fs := NewFileStore(&mockEmbedder{dim: 8}, newMockVectorStore(), newMockKeywordStore(),
+		&RuleTokenCounter{Divisor: 3.75}, "test_date_filter", 200, 40)
+
+	ctx := context.Background()
+
+	// 写入不同日期的记忆
+	_ = fs.IndexFileWithDate(ctx, "memory/2026-06-01.md", "## Decision\nUse Python", "2026-06-01")
+	_ = fs.IndexFileWithDate(ctx, "memory/2026-07-15.md", "## Decision\nUse Go", "2026-07-15")
+
+	// 搜索 "Decision" 应返回两个 chunk
+	results1, _ := fs.HybridSearch(ctx, "Decision", 10)
+	if len(results1) < 2 {
+		t.Logf("hybrid search returned %d results for 'Decision'", len(results1))
+	}
+
+	// 带日期约束的搜索：只返回 2026-06-01 的
+	results2, err := fs.HybridSearchWithDate(ctx, "Decision on 2026-06-01", 10)
+	if err != nil {
+		t.Fatalf("HybridSearchWithDate: %v", err)
+	}
+	if len(results2) == 0 {
+		t.Fatal("expected at least 1 result for dated search")
+	}
+	foundOther := false
+	for _, r := range results2 {
+		if r.DateLabel == "2026-07-15" {
+			foundOther = true
+		}
+	}
+	if foundOther {
+		t.Error("date filter should exclude 2026-07-15 results when searching 2026-06-01")
+	}
+}
+
+func TestIsDatePattern(t *testing.T) {
+	if !isDatePattern("2026-07-04", '-') {
+		t.Error("valid date with dash")
+	}
+	if !isDatePattern("2026/07/04", '/') {
+		t.Error("valid date with slash")
+	}
+	if isDatePattern("2026-7-04", '-') {
+		t.Error("invalid: single digit month")
+	}
+	if isDatePattern("not-a-date-", '-') {
+		t.Error("invalid: letters")
+	}
+	if isDatePattern("2026-07-04extra", '-') {
+		t.Error("invalid: too long (checked in substring context)")
+	}
+}
+
+func TestParseFrontmatter_Complex(t *testing.T) {
+	content := "---\nconversation_date: 2026-07-04\nother_field: value\n---\n## Memory\nSome content here"
+	date, body := ParseFrontmatter(content)
+	if date != "2026-07-04" {
+		t.Errorf("date = %q", date)
+	}
+	if !strings.HasPrefix(body, "## Memory") {
+		t.Errorf("body should start with ## Memory, got: %s", body)
+	}
+}
+
+func TestParseFrontmatter_OnlyDate(t *testing.T) {
+	content := "---\nconversation_date: 2026-07-04\n---\nContent"
+	date, body := ParseFrontmatter(content)
+	if date != "2026-07-04" {
+		t.Errorf("date = %q", date)
+	}
+	if body != "Content" {
+		t.Errorf("body = %q", body)
 	}
 }

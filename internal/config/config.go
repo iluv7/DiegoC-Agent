@@ -42,6 +42,18 @@ type MCPConfig struct {
 	SSEReadTimeout  float64 `yaml:"sse_read_timeout"`
 }
 
+// MemoryConfig holds memory pipeline settings.
+type MemoryConfig struct {
+	Enabled         bool    `yaml:"enabled"`
+	WorkingDir      string  `yaml:"working_dir"`
+	MaxInputLength  int     `yaml:"max_input_length"`
+	CompactRatio    float64 `yaml:"compact_ratio"`
+	CompactReserve  int     `yaml:"compact_reserve"`
+	ToolResultKeepN int     `yaml:"tool_result_keep_n"`
+	Language        string  `yaml:"language"`
+	RetentionDays   int     `yaml:"retention_days"`
+}
+
 // ToolsConfig holds tool feature flags and paths.
 type ToolsConfig struct {
 	EnableFileTools bool      `yaml:"enable_file_tools"`
@@ -59,6 +71,7 @@ type Config struct {
 	LLM    LLMConfig    `yaml:"-"`
 	Agent  AgentConfig  `yaml:"-"`
 	Tools  ToolsConfig  `yaml:"-"`
+	Memory MemoryConfig `yaml:"-"`
 }
 
 // rawConfig is used to parse YAML with flat and nested keys.
@@ -78,6 +91,16 @@ type rawConfig struct {
 	WorkspaceDir     string `yaml:"workspace_dir"`
 	SystemPromptPath string `yaml:"system_prompt_path"`
 	TokenLimit       int    `yaml:"token_limit"`
+	Memory           struct {
+		Enabled         bool    `yaml:"enabled"`
+		WorkingDir      string  `yaml:"working_dir"`
+		MaxInputLength  int     `yaml:"max_input_length"`
+		CompactRatio    float64 `yaml:"compact_ratio"`
+		CompactReserve  int     `yaml:"compact_reserve"`
+		ToolResultKeepN int     `yaml:"tool_result_keep_n"`
+		Language        string  `yaml:"language"`
+		RetentionDays   int     `yaml:"retention_days"`
+	} `yaml:"memory"`
 	Tools            struct {
 		EnableFileTools bool   `yaml:"enable_file_tools"`
 		EnableBash      bool   `yaml:"enable_bash"`
@@ -187,6 +210,28 @@ func FromYAML(path string) (*Config, error) {
 	if raw.TokenLimit <= 0 {
 		raw.TokenLimit = 80000
 	}
+	// Memory defaults
+	if raw.Memory.WorkingDir == "" {
+		raw.Memory.WorkingDir = ".reme"
+	}
+	if raw.Memory.MaxInputLength <= 0 {
+		raw.Memory.MaxInputLength = 128000
+	}
+	if raw.Memory.CompactRatio <= 0 {
+		raw.Memory.CompactRatio = 0.7
+	}
+	if raw.Memory.CompactReserve <= 0 {
+		raw.Memory.CompactReserve = 10000
+	}
+	if raw.Memory.ToolResultKeepN <= 0 {
+		raw.Memory.ToolResultKeepN = 3
+	}
+	if raw.Memory.Language == "" {
+		raw.Memory.Language = "zh"
+	}
+	if raw.Memory.RetentionDays <= 0 {
+		raw.Memory.RetentionDays = 3
+	}
 	if raw.Retry.InitialDelay == 0 {
 		raw.Retry.InitialDelay = 1.0
 	}
@@ -248,6 +293,16 @@ func FromYAML(path string) (*Config, error) {
 				ExecuteTimeout:  raw.Tools.MCP.ExecuteTimeout,
 				SSEReadTimeout:  raw.Tools.MCP.SSEReadTimeout,
 			},
+		},
+		Memory: MemoryConfig{
+			Enabled:         raw.Memory.Enabled,
+			WorkingDir:      raw.Memory.WorkingDir,
+			MaxInputLength:  raw.Memory.MaxInputLength,
+			CompactRatio:    raw.Memory.CompactRatio,
+			CompactReserve:  raw.Memory.CompactReserve,
+			ToolResultKeepN: raw.Memory.ToolResultKeepN,
+			Language:        raw.Memory.Language,
+			RetentionDays:   raw.Memory.RetentionDays,
 		},
 	}
 	return cfg, nil

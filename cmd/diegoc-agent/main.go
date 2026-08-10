@@ -16,6 +16,7 @@ import (
 	"diegoc-agent/internal/config"
 	"diegoc-agent/internal/logger"
 	"diegoc-agent/internal/llm"
+	"diegoc-agent/internal/memory"
 	"diegoc-agent/internal/permission"
 	"diegoc-agent/internal/schema"
 	"diegoc-agent/internal/tools"
@@ -121,6 +122,24 @@ func main() {
 	ag := agent.New(client, systemPrompt, cfg.Agent.MaxSteps, cfg.Agent.TokenLimit, toolList)
 		agentLogger := logger.New()
 	ag.Logger = agentLogger
+
+	// Phase 11-12: Memory pipeline (optional, opt-in via config)
+	if cfg.Memory.Enabled {
+		memCfg := memory.Config{
+			WorkingDir:      cfg.Memory.WorkingDir,
+			MaxInputLength:  cfg.Memory.MaxInputLength,
+			CompactRatio:    cfg.Memory.CompactRatio,
+			CompactReserve:  cfg.Memory.CompactReserve,
+			ToolResultKeepN: cfg.Memory.ToolResultKeepN,
+			Language:        cfg.Memory.Language,
+			RetentionDays:   cfg.Memory.RetentionDays,
+		}
+		memManager := memory.NewManager(memCfg, client)
+		if memManager != nil {
+			ag.SetMemoryManager(memManager)
+			defer memManager.Close()
+		}
+	}
 
 	runInteractive(ag, workspaceDir, agentLogger)
 }

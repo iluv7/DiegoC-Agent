@@ -6,6 +6,7 @@ import (
 
 	"diegoc-agent/internal/llm"
 	"diegoc-agent/internal/logger"
+	"diegoc-agent/internal/memory"
 	"diegoc-agent/internal/permission"
 	"diegoc-agent/internal/schema"
 	"diegoc-agent/internal/tools"
@@ -23,6 +24,10 @@ type Agent struct {
 	APITotalTokens int
 	skipNextTokenCheck bool
 	Logger        *logger.AgentLogger
+
+	// Memory pipeline (Phase 11-12). When set, replaces the legacy summarizeIfNeeded.
+	memoryManager    *memory.Manager
+	compressedSummary string
 
 	// HITL 权限系统
 	PermissionCtx     permission.Context
@@ -71,6 +76,12 @@ func (a *Agent) AddUserMessage(content string) {
 	a.Messages = append(a.Messages, schema.Message{Role: "user", Content: content})
 }
 
+// SetMemoryManager configures the memory pipeline.
+// When set, PreReasoningHook replaces the legacy summarizeIfNeeded in the agent loop.
+func (a *Agent) SetMemoryManager(mgr *memory.Manager) {
+	a.memoryManager = mgr
+}
+
 // RunWithHITL executes the loop with HITL support.
 // 当工具需要用户确认时，通过 eventCh 发送 HITLConfirmRequest，
 // 然后阻塞等待 inputCh 收到 HITLConfirmResponse。
@@ -104,8 +115,21 @@ func (a *Agent) runLoop(
 		default:
 		}
 
-		if err := a.summarizeIfNeeded(ctx); err != nil {
-			return "", err
+		if a.memoryManager != nil {
+			// Phase 11-12: full memory pipeline
+			keptMsgs, summary, err := a.memoryManager.PreReasoningHook(ctx, a.Messages, a.SystemPrompt)
+			if err != nil {
+				return "", err
+			}
+			a.Messages = keptMsgs
+			if summary != "" {
+				a.compressedSummary = summary
+			}
+		} else {
+			// Legacy fallback: simple per-round summarization
+			if err := a.summarizeIfNeeded(ctx); err != nil {
+				return "", err
+			}
 		}
 
 		if a.Logger != nil {

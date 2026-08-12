@@ -52,6 +52,9 @@ type Manager struct {
 	msgHandler     *MsgHandler
 	tokenCounter   TokenCounter
 
+	fileStore   *FileStore   // Phase 9: memory file index + search
+	fileWatcher *FileWatcher // Phase 9: watches memory dir for changes
+
 	llmClient llm.Client
 	mu        sync.Mutex
 }
@@ -229,14 +232,64 @@ func (m *Manager) AddMessage(msg schema.Message) {
 	m.inMemory.AddMessage(msg)
 }
 
-// Close performs cleanup: removes expired tool_result files.
+// SetFileStore injects a FileStore for memory indexing and search (Phase 9).
+// When set, the Manager also creates a FileWatcher to automatically keep the
+// index in sync with the memory directory.
+func (m *Manager) SetFileStore(fs *FileStore) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.fileStore = fs
+	m.fileWatcher = NewFileWatcher(m.memoryDir(), fs)
+}
+
+// Start begins background operations (currently: the FileWatcher polling loop).
+// Must be called after SetFileStore if indexing/search is desired.
+// Safe to call even if no FileStore is configured — it is a no-op in that case.
+func (m *Manager) Start(ctx context.Context) error {
+	m.mu.Lock()
+	fw := m.fileWatcher
+	m.mu.Unlock()
+
+	if fw != nil {
+		return fw.Start(ctx)
+	}
+	return nil
+}
+
+// SearchMemory performs a hybrid (vector + BM25 keyword) search over indexed
+// memory files. Returns nil if no FileStore is configured.
+func (m *Manager) SearchMemory(ctx context.Context, query string, limit int) ([]SearchResult, error) {
+	m.mu.Lock()
+	fs := m.fileStore
+	m.mu.Unlock()
+
+	if fs == nil {
+		return nil, nil
+	}
+	return fs.HybridSearchWithDate(ctx, query, limit)
+}
+
+// memoryDir returns the memory directory path derived from WorkingDir.
+func (m *Manager) memoryDir() string {
+	return filepath.Join(m.cfg.WorkingDir, "memory")
+}
+
+// Close performs cleanup: stops the FileWatcher and removes expired tool_result files.
 func (m *Manager) Close() error {
+	m.mu.Lock()
+	fw := m.fileWatcher
+	m.mu.Unlock()
+
+	// Stop file watcher outside the lock to avoid deadlock with poll goroutine.
+	if fw != nil {
+		fw.Stop()
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	deleted := m.toolCompactor.CleanupExpiredFiles()
 	if deleted > 0 {
-		// Best-effort logging; we don't have a logger here.
 		_ = deleted
 	}
 	return nil

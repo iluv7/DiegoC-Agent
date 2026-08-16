@@ -209,6 +209,11 @@ func (fs *FileStore) GetFileMeta(path string) *FileMeta {
 	return m
 }
 
+// Close 关闭底层存储（当前只关闭 FTS5 SQLite 连接）。
+func (fs *FileStore) Close() error {
+	return fs.kwStore.Close()
+}
+
 // ---- 搜索 ----
 
 // VectorSearch 纯向量语义搜索。

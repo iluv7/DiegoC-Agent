@@ -119,11 +119,9 @@ func main() {
 	}
 	workspaceInfo := "\n\n## Current Workspace\nYou are working in: `" + workspaceDir + "`\n"
 	systemPrompt += workspaceInfo
-	ag := agent.New(client, systemPrompt, cfg.Agent.MaxSteps, cfg.Agent.TokenLimit, toolList)
-		agentLogger := logger.New()
-	ag.Logger = agentLogger
 
-	// Phase 11-12: Memory pipeline (optional, opt-in via config)
+	// Phase 11-13: Memory pipeline (optional, opt-in via config)
+	var memManager *memory.Manager
 	if cfg.Memory.Enabled {
 		memCfg := memory.Config{
 			WorkingDir:      cfg.Memory.WorkingDir,
@@ -134,11 +132,26 @@ func main() {
 			Language:        cfg.Memory.Language,
 			RetentionDays:   cfg.Memory.RetentionDays,
 		}
-		memManager := memory.NewManager(memCfg, client)
+		memManager = memory.NewManager(memCfg, client)
 		if memManager != nil {
-			ag.SetMemoryManager(memManager)
-			defer memManager.Close()
+			// Phase 9-10: FileStore (ChromaDB + FTS5) + FileWatcher + memory_search tool.
+			if fs := buildMemoryFileStore(cfg, memCfg.WorkingDir); fs != nil {
+				memManager.SetFileStore(fs)
+				if searchTool := memManager.SearchTool(); searchTool != nil {
+					toolList = append(toolList, searchTool)
+				}
+				_ = memManager.Start(context.Background())
+			}
 		}
+	}
+
+	ag := agent.New(client, systemPrompt, cfg.Agent.MaxSteps, cfg.Agent.TokenLimit, toolList)
+	agentLogger := logger.New()
+	ag.Logger = agentLogger
+
+	if memManager != nil {
+		ag.SetMemoryManager(memManager)
+		defer memManager.Close()
 	}
 
 	runInteractive(ag, workspaceDir, agentLogger)
@@ -192,6 +205,36 @@ func buildTools(cfg *config.Config, workspaceDir string) ([]tools.Tool, *tools.S
 		}
 	}
 	return list, skillLoader
+}
+
+// buildMemoryFileStore constructs the Phase 9-10 memory index stack:
+// embedding client + ChromaDB vector store + SQLite FTS5 keyword store.
+// Returns nil if any component fails to initialize (memory pipeline
+// still works without index/search).
+func buildMemoryFileStore(cfg *config.Config, workingDir string) *memory.FileStore {
+	embedder := memory.NewOpenAIEmbeddingClient(cfg.LLM.APIKey, cfg.LLM.APIBase, cfg.Memory.EmbeddingModel)
+	chroma := memory.NewChromaClient(cfg.Memory.ChromaEndpoint)
+
+	fileStoreDir := filepath.Join(workingDir, "file_store")
+	if err := os.MkdirAll(fileStoreDir, 0755); err != nil {
+		fmt.Printf("✗ Failed to create file_store dir: %v\n", err)
+		return nil
+	}
+	kwStore, err := memory.NewFTS5Store(filepath.Join(fileStoreDir, "fts5_index.db"))
+	if err != nil {
+		fmt.Printf("✗ Failed to open FTS5 index: %v\n", err)
+		return nil
+	}
+
+	return memory.NewFileStore(
+		embedder,
+		chroma,
+		kwStore,
+		memory.NewRuleTokenCounter(),
+		"diego_memory",
+		400, // chunkTokens
+		80,  // overlap
+	)
 }
 
 func resolveSkillsDir(configured string) string {

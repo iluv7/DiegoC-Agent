@@ -52,6 +52,9 @@ type MemoryConfig struct {
 	ToolResultKeepN int     `yaml:"tool_result_keep_n"`
 	Language        string  `yaml:"language"`
 	RetentionDays   int     `yaml:"retention_days"`
+	// Phase 9-10: file index + memory_search tool
+	ChromaEndpoint string `yaml:"chroma_endpoint"` // ChromaDB HTTP endpoint
+	EmbeddingModel string `yaml:"embedding_model"` // embedding API model name
 }
 
 // ToolsConfig holds tool feature flags and paths.
@@ -100,6 +103,8 @@ type rawConfig struct {
 		ToolResultKeepN int     `yaml:"tool_result_keep_n"`
 		Language        string  `yaml:"language"`
 		RetentionDays   int     `yaml:"retention_days"`
+		ChromaEndpoint  string  `yaml:"chroma_endpoint"`
+		EmbeddingModel  string  `yaml:"embedding_model"`
 	} `yaml:"memory"`
 	Tools            struct {
 		EnableFileTools bool   `yaml:"enable_file_tools"`
@@ -232,6 +237,12 @@ func FromYAML(path string) (*Config, error) {
 	if raw.Memory.RetentionDays <= 0 {
 		raw.Memory.RetentionDays = 3
 	}
+	if raw.Memory.ChromaEndpoint == "" {
+		raw.Memory.ChromaEndpoint = "http://localhost:8000"
+	}
+	if raw.Memory.EmbeddingModel == "" {
+		raw.Memory.EmbeddingModel = "text-embedding-v4"
+	}
 	if raw.Retry.InitialDelay == 0 {
 		raw.Retry.InitialDelay = 1.0
 	}
@@ -303,6 +314,8 @@ func FromYAML(path string) (*Config, error) {
 			ToolResultKeepN: raw.Memory.ToolResultKeepN,
 			Language:        raw.Memory.Language,
 			RetentionDays:   raw.Memory.RetentionDays,
+			ChromaEndpoint:  raw.Memory.ChromaEndpoint,
+			EmbeddingModel:  raw.Memory.EmbeddingModel,
 		},
 	}
 	return cfg, nil

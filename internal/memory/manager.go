@@ -9,6 +9,7 @@ import (
 
 	"diegoc-agent/internal/llm"
 	"diegoc-agent/internal/schema"
+	"diegoc-agent/internal/tools"
 )
 
 // Config holds memory pipeline configuration.
@@ -274,15 +275,32 @@ func (m *Manager) memoryDir() string {
 	return filepath.Join(m.cfg.WorkingDir, "memory")
 }
 
-// Close performs cleanup: stops the FileWatcher and removes expired tool_result files.
+// SearchTool returns the memory_search tool (Phase 10) for registration
+// with the Agent's tool list. Returns nil if no FileStore is configured.
+func (m *Manager) SearchTool() tools.Tool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.fileStore == nil {
+		return nil
+	}
+	return NewMemorySearchTool(m.fileStore, m.llmClient, m.cfg.Language)
+}
+
+// Close performs cleanup: stops the FileWatcher, closes the FileStore's
+// SQLite connection, and removes expired tool_result files.
 func (m *Manager) Close() error {
 	m.mu.Lock()
 	fw := m.fileWatcher
+	fs := m.fileStore
 	m.mu.Unlock()
 
 	// Stop file watcher outside the lock to avoid deadlock with poll goroutine.
 	if fw != nil {
 		fw.Stop()
+	}
+	if fs != nil {
+		_ = fs.Close()
 	}
 
 	m.mu.Lock()

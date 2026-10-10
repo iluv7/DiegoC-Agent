@@ -14,26 +14,28 @@ import (
 
 // Agent runs the conversation loop with optional tools and HITL support.
 type Agent struct {
-	LLM           llm.Client
-	SystemPrompt  string
-	Messages      []schema.Message
-	MaxSteps      int
-	TokenLimit    int
-	Tools         []tools.Tool
-	toolByName    map[string]tools.Tool
-	APITotalTokens int
+	checkpoints        []checkpoint
+	checkpointSequence int
+	LLM                llm.Client
+	SystemPrompt       string
+	Messages           []schema.Message
+	MaxSteps           int
+	TokenLimit         int
+	Tools              []tools.Tool
+	toolByName         map[string]tools.Tool
+	APITotalTokens     int
 	skipNextTokenCheck bool
-	Logger        *logger.AgentLogger
+	Logger             *logger.AgentLogger
 
 	// Memory pipeline (Phase 11-12). When set, replaces the legacy summarizeIfNeeded.
-	memoryManager    *memory.Manager
+	memoryManager     *memory.Manager
 	compressedSummary string
 
 	// HITL 权限系统
-	PermissionCtx     permission.Context
-	permissionEngine  *permission.Engine
-	replyID           string                 // 当前回复的 ID，关联 HITL request 和 response
-	toolCallStates    map[string]permission.ToolCallState // tool_call_id → 状态
+	PermissionCtx    permission.Context
+	permissionEngine *permission.Engine
+	replyID          string                              // 当前回复的 ID，关联 HITL request 和 response
+	toolCallStates   map[string]permission.ToolCallState // tool_call_id → 状态
 }
 
 // New creates an Agent with system prompt and tools.
@@ -73,6 +75,7 @@ func NewWithPermission(client llm.Client, systemPrompt string, maxSteps int, tok
 
 // AddUserMessage appends a user message.
 func (a *Agent) AddUserMessage(content string) {
+	a.makeCheckpoint(content)
 	a.Messages = append(a.Messages, schema.Message{Role: "user", Content: content})
 }
 
@@ -263,7 +266,19 @@ func (a *Agent) runLoop(
 func (a *Agent) executeAndAppend(ctx context.Context, tc schema.ToolCall, tool tools.Tool, args map[string]interface{}) {
 	var result *tools.ToolResult
 	var execErr error
+	path, backupErr := a.trackBefore(tool, args)
+	if backupErr != nil {
+		a.appendToolError(tc, "Cannot create rewind backup: "+backupErr.Error())
+		a.toolCallStates[tc.ID] = permission.ToolCallFinished
+		return
+	}
 	result, execErr = tool.Execute(ctx, args)
+	if path != "" {
+		version, err := readVersion(path)
+		if err == nil {
+			a.checkpoints[len(a.checkpoints)-1].After[path] = version
+		}
+	}
 	if execErr != nil {
 		result = &tools.ToolResult{Success: false, Error: execErr.Error()}
 	}

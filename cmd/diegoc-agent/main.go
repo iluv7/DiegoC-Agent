@@ -1,12 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
-	"bufio"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -14,8 +14,8 @@ import (
 
 	"diegoc-agent/internal/agent"
 	"diegoc-agent/internal/config"
-	"diegoc-agent/internal/logger"
 	"diegoc-agent/internal/llm"
+	"diegoc-agent/internal/logger"
 	"diegoc-agent/internal/memory"
 	"diegoc-agent/internal/permission"
 	"diegoc-agent/internal/schema"
@@ -30,7 +30,7 @@ const appName = "DiegoC Agent"
 
 // ANSI colors and styles for terminal UI (empty when stdout is not a TTY)
 var (
-	cReset, cBold, cDim, cCyan, cGreen, cYellow, cBlue, cMagenta, cRed string
+	cReset, cBold, cDim, cCyan, cGreen, cYellow, cBlue, cMagenta, cRed  string
 	cBrightCyan, cBrightBlue, cBrightGreen, cBrightYellow, cBrightWhite string
 )
 
@@ -326,7 +326,7 @@ func runLogSubcommand(filename string) {
 	fmt.Printf("%s%s%s\n", cDim, strings.Repeat("─", 80), cReset)
 }
 
-var slashCommands = []string{"/help", "/clear", "/history", "/stats", "/log", "/exit", "/quit", "/q"}
+var slashCommands = []string{"/help", "/rewind", "/clear", "/history", "/stats", "/log", "/exit", "/quit", "/q"}
 
 func runInteractive(ag *agent.Agent, workspaceDir string, agentLogger *logger.AgentLogger) {
 	sessionStart := time.Now()
@@ -384,6 +384,10 @@ func runInteractive(ag *agent.Agent, workspaceDir string, agentLogger *logger.Ag
 				printStats(ag, sessionStart)
 				return
 			}
+			if cmd == "/rewind" || strings.HasPrefix(cmd, "/rewind ") {
+				handleRewind(ag, state, line)
+				continue
+			}
 			if cmd == "/help" {
 				printHelp()
 				continue
@@ -391,7 +395,7 @@ func runInteractive(ag *agent.Agent, workspaceDir string, agentLogger *logger.Ag
 			if cmd == "/clear" {
 				oldCount := len(ag.Messages)
 				if oldCount > 1 {
-					ag.Messages = ag.Messages[:1]
+					ag.ClearConversation()
 					fmt.Printf("%s✅ Cleared %d messages, new session.%s\n\n", cGreen, oldCount-1, cReset)
 				} else {
 					fmt.Printf("%sHistory already empty.%s\n\n", cDim, cReset)
@@ -455,57 +459,57 @@ func runInteractive(ag *agent.Agent, workspaceDir string, agentLogger *logger.Ag
 	agentLoop:
 		for {
 			select {
-				case req := <-hitlReqCh:
-					for _, tc := range req.ToolCalls {
-						fmt.Printf("\n%s⚠️  Agent wants to run: %s%s%s%s\n", cBrightYellow, cBold, cBrightCyan, tc.Name, cReset)
-						fmt.Printf("   Args: %v\n", tc.Args)
+			case req := <-hitlReqCh:
+				for _, tc := range req.ToolCalls {
+					fmt.Printf("\n%s⚠️  Agent wants to run: %s%s%s%s\n", cBrightYellow, cBold, cBrightCyan, tc.Name, cReset)
+					fmt.Printf("   Args: %v\n", tc.Args)
 
-						fmt.Printf("   %s[y=yes / a=always allow / n=no]%s ", cDim, cReset)
-						reader := bufio.NewReader(os.Stdin)
-						text, _ := reader.ReadString('\n')
-						answer := strings.TrimSpace(strings.ToLower(text))
+					fmt.Printf("   %s[y=yes / a=always allow / n=no]%s ", cDim, cReset)
+					reader := bufio.NewReader(os.Stdin)
+					text, _ := reader.ReadString('\n')
+					answer := strings.TrimSpace(strings.ToLower(text))
 
-						switch {
-						case answer == "y" || answer == "yes":
-							// 只这次允许
-							hitlRespCh <- permission.HITLConfirmResponse{
-								ReplyID: req.ReplyID,
-								Results: []permission.ToolConfirmResult{{
-									ToolCall:  tc,
-									Confirmed: true,
-								}},
-							}
-							fmt.Printf("   %s✅ Allowed (this time)%s\n", cGreen, cReset)
-
-						case answer == "a" || answer == "always":
-							// 永远允许 → 生成规则
-							rules := makeAllowRule(tc)
-							hitlRespCh <- permission.HITLConfirmResponse{
-								ReplyID: req.ReplyID,
-								Results: []permission.ToolConfirmResult{{
-									ToolCall:  tc,
-									Confirmed: true,
-									Rules:     rules,
-								}},
-							}
-							fmt.Printf("   %s✅ Allowed (always)%s\n", cGreen, cReset)
-							if len(rules) > 0 {
-								fmt.Printf("   %s📌 Rule added: %s %s → %s%s\n",
-									cDim, rules[0].ToolName, rules[0].RuleContent, rules[0].Behavior, cReset)
-							}
-
-						default:
-							// n 或任何其他 → 拒绝
-							hitlRespCh <- permission.HITLConfirmResponse{
-								ReplyID: req.ReplyID,
-								Results: []permission.ToolConfirmResult{{
-									ToolCall:  tc,
-									Confirmed: false,
-								}},
-							}
-							fmt.Printf("   %s❌ Denied%s\n", cRed, cReset)
+					switch {
+					case answer == "y" || answer == "yes":
+						// 只这次允许
+						hitlRespCh <- permission.HITLConfirmResponse{
+							ReplyID: req.ReplyID,
+							Results: []permission.ToolConfirmResult{{
+								ToolCall:  tc,
+								Confirmed: true,
+							}},
 						}
+						fmt.Printf("   %s✅ Allowed (this time)%s\n", cGreen, cReset)
+
+					case answer == "a" || answer == "always":
+						// 永远允许 → 生成规则
+						rules := makeAllowRule(tc)
+						hitlRespCh <- permission.HITLConfirmResponse{
+							ReplyID: req.ReplyID,
+							Results: []permission.ToolConfirmResult{{
+								ToolCall:  tc,
+								Confirmed: true,
+								Rules:     rules,
+							}},
+						}
+						fmt.Printf("   %s✅ Allowed (always)%s\n", cGreen, cReset)
+						if len(rules) > 0 {
+							fmt.Printf("   %s📌 Rule added: %s %s → %s%s\n",
+								cDim, rules[0].ToolName, rules[0].RuleContent, rules[0].Behavior, cReset)
+						}
+
+					default:
+						// n 或任何其他 → 拒绝
+						hitlRespCh <- permission.HITLConfirmResponse{
+							ReplyID: req.ReplyID,
+							Results: []permission.ToolConfirmResult{{
+								ToolCall:  tc,
+								Confirmed: false,
+							}},
+						}
+						fmt.Printf("   %s❌ Denied%s\n", cRed, cReset)
 					}
+				}
 
 			case result := <-agentDone:
 				out = result.out
@@ -585,6 +589,7 @@ func formatMarkdownForTerminal(s string) string {
 }
 
 func printHelp() {
+	fmt.Println("  /rewind [ID] [both|conversation|files] - Select a message or restore a turn")
 	fmt.Printf(`
 %sAvailable Commands:%s
   %s/help%s      - Show this help
@@ -688,30 +693,18 @@ func runWithEscCancel(ctx context.Context, cancel context.CancelFunc, done chan 
 		return
 	}
 	defer term.Restore(fd, oldState)
-	ch := make(chan byte, 32)
-	go func() {
-		buf := make([]byte, 1)
-		for {
-			n, _ := f.Read(buf)
-			if n > 0 {
-				select {
-				case ch <- buf[0]:
-				case <-ctx.Done():
-					return
-				}
-			}
-		}
-	}()
 	for {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			return
-		case b := <-ch:
-			if b == 0x1b {
-				fmt.Printf("\n%s⏹  Esc pressed, cancelling...%s\n", cBrightYellow, cReset)
-				cancel()
-				return
-			}
+		}
+		b, ok, err := readTerminalByte(f, 100)
+		if err != nil {
+			return
+		}
+		if ok && b == 0x1b {
+			fmt.Printf("\n%s⏹  Esc pressed, cancelling...%s\n", cBrightYellow, cReset)
+			cancel()
+			return
 		}
 	}
 }
@@ -730,7 +723,6 @@ func stdinFile() (*os.File, bool) {
 	}
 	return f, true
 }
-
 
 // makeAllowRule 根据工具调用生成"始终允许"规则。
 func makeAllowRule(tc permission.PendingToolCall) []permission.Rule {
@@ -774,5 +766,86 @@ func makeAllowRule(tc permission.PendingToolCall) []permission.Rule {
 			Behavior: permission.BehaviorALLOW,
 			Source:   "userConfirm",
 		}}
+	}
+}
+
+func handleRewind(ag *agent.Agent, state *liner.State, line string) {
+	parts := strings.Fields(line)
+	if len(parts) == 1 {
+		checkpoints := ag.Checkpoints()
+		if len(checkpoints) == 0 {
+			fmt.Println("No messages to rewind.")
+			return
+		}
+		options := make([]string, len(checkpoints))
+		for i, cp := range checkpoints {
+			options[i] = fmt.Sprintf("%d  %s", cp.ID, cp.Prompt)
+		}
+		selected, err := selectRewindOption("Rewind to before which message?", options, len(options)-1)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		if selected < 0 {
+			fmt.Println("Rewind cancelled")
+			return
+		}
+		mode, err := selectRewindOption("Restore before: "+checkpoints[selected].Prompt, []string{"Conversation and files", "Conversation only", "Files only"}, 0)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		if mode < 0 {
+			fmt.Println("Rewind cancelled")
+			return
+		}
+		modes := []string{"both", "conversation", "files"}
+		applyRewind(ag, checkpoints[selected].ID, modes[mode])
+		return
+	}
+	if len(parts) > 3 {
+		fmt.Println("Usage: /rewind ID [both|conversation|files]")
+		return
+	}
+	var id int
+	if _, err := fmt.Sscan(parts[1], &id); err != nil || fmt.Sprint(id) != parts[1] {
+		fmt.Println("Invalid checkpoint ID")
+		return
+	}
+	mode := "both"
+	if len(parts) == 3 {
+		mode = parts[2]
+	}
+	if mode != "both" && mode != "conversation" && mode != "files" {
+		fmt.Println("Mode must be both, conversation, or files")
+		return
+	}
+	found := false
+	for _, cp := range ag.Checkpoints() {
+		if cp.ID == id {
+			found = true
+		}
+	}
+	if !found {
+		fmt.Println("Checkpoint not found")
+		return
+	}
+	answer, err := state.Prompt("Restore " + mode + " before this turn? [y/N] ")
+	if err != nil || strings.ToLower(strings.TrimSpace(answer)) != "y" {
+		fmt.Println("Rewind cancelled")
+		return
+	}
+	applyRewind(ag, id, mode)
+}
+
+func applyRewind(ag *agent.Agent, id int, mode string) {
+	prompt, err := ag.Rewind(id, mode)
+	if err != nil {
+		fmt.Printf("Rewind failed: %v\n", err)
+		return
+	}
+	fmt.Println("Rewind complete.")
+	if mode != "files" {
+		fmt.Printf("Original prompt: %s\n", prompt)
 	}
 }

@@ -21,6 +21,11 @@ type AgentLogger struct {
 func New() *AgentLogger {
 	home, _ := os.UserHomeDir()
 	logDir := filepath.Join(home, ".diegoc-agent", "log")
+	return NewInDirectory(logDir)
+}
+
+// NewInDirectory creates an independent session logger in an existing log location.
+func NewInDirectory(logDir string) *AgentLogger {
 	_ = os.MkdirAll(logDir, 0755)
 	return &AgentLogger{logDir: logDir}
 }
@@ -31,7 +36,7 @@ func (l *AgentLogger) StartNewRun() {
 		l.logFile.Close()
 		l.logFile = nil
 	}
-	timestamp := time.Now().Format("20060102_150405")
+	timestamp := time.Now().Format("20060102_150405.000000000")
 	name := fmt.Sprintf("agent_run_%s.log", timestamp)
 	path := filepath.Join(l.logDir, name)
 	f, err := os.Create(path)
@@ -128,4 +133,12 @@ func (l *AgentLogger) GetLogFilePath() string {
 // LogDir returns the log directory (~/.diegoc-agent/log).
 func (l *AgentLogger) LogDir() string {
 	return l.logDir
+}
+
+// Close releases this session's current log file.
+func (l *AgentLogger) Close() {
+	if l.logFile != nil {
+		l.logFile.Close()
+		l.logFile = nil
+	}
 }

@@ -162,6 +162,10 @@ func writeVersion(path string, v fileVersion) error {
 // Rewind restores the state immediately before the selected user turn.
 // It must be called while the agent is idle. Modes: conversation, files, both.
 func (a *Agent) Rewind(id int, mode string) (string, error) {
+	if a.forks != nil {
+		a.forks.toolMu.Lock()
+		defer a.forks.toolMu.Unlock()
+	}
 	if mode != "conversation" && mode != "files" && mode != "both" {
 		return "", fmt.Errorf("mode must be conversation, files, or both")
 	}

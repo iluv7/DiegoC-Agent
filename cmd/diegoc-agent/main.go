@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -326,10 +325,17 @@ func runLogSubcommand(filename string) {
 	fmt.Printf("%s%s%s\n", cDim, strings.Repeat("─", 80), cReset)
 }
 
-var slashCommands = []string{"/help", "/rewind", "/clear", "/history", "/stats", "/log", "/exit", "/quit", "/q"}
+var slashCommands = []string{"/fork", "/sessions", "/switch", "/session", "/tasks", "/send", "/cancel", "/approve", "/help", "/rewind", "/clear", "/history", "/stats", "/log", "/exit", "/quit", "/q"}
 
 func runInteractive(ag *agent.Agent, workspaceDir string, agentLogger *logger.AgentLogger) {
 	sessionStart := time.Now()
+	forks := agent.NewForkManager(context.Background())
+	defer forks.Close()
+	ag.EnableForks(forks)
+	sessions := agent.NewConversationSessions(ag)
+	defer sessions.Close()
+	histories := map[string][]string{}
+	var inputHistory []string
 	printBanner(workspaceDir)
 
 	state := liner.NewLiner()
@@ -340,6 +346,9 @@ func runInteractive(ag *agent.Agent, workspaceDir string, agentLogger *logger.Ag
 		_ = os.MkdirAll(filepath.Dir(historyPath), 0755)
 		if f, err := os.Open(historyPath); err == nil {
 			state.ReadHistory(f)
+			if data, err := os.ReadFile(historyPath); err == nil {
+				inputHistory = strings.Split(strings.TrimSpace(string(data)), "\n")
+			}
 			f.Close()
 		}
 		defer func() {
@@ -359,9 +368,15 @@ func runInteractive(ag *agent.Agent, workspaceDir string, agentLogger *logger.Ag
 		return out
 	})
 
+	histories["main"] = inputHistory
 	for {
+		current := sessions.Current()
+		sessionStart = current.CreatedAt
+		ag = current.Agent
+		agentLogger = ag.Logger
+		inputHistory = histories[current.ID]
 		// liner 不接受含 ANSI 转义的 prompt，会报 "invalid prompt"，故用纯文本
-		line, err := state.Prompt("You › ")
+		line, err := promptSessionInput(state, forks, inputHistory, "You ["+current.ID+"] › ", false)
 		if err != nil {
 			if err == liner.ErrPromptAborted {
 				fmt.Printf("\n%s👋 Interrupt, exiting...%s\n\n", cBrightYellow, cReset)
@@ -374,6 +389,16 @@ func runInteractive(ag *agent.Agent, workspaceDir string, agentLogger *logger.Ag
 		}
 		line = strings.TrimSpace(line)
 		if line == "" {
+			continue
+		}
+
+		inputHistory = append(inputHistory, line)
+		histories[current.ID] = inputHistory
+		state.AppendHistory(line)
+		if handleSessionCommand(sessions, line, selectRewindOption) {
+			continue
+		}
+		if handleBackgroundCommand(forks, line) {
 			continue
 		}
 
@@ -436,11 +461,17 @@ func runInteractive(ag *agent.Agent, workspaceDir string, agentLogger *logger.Ag
 		hitlReqCh := make(chan permission.HITLConfirmRequest, 1)
 		hitlRespCh := make(chan permission.HITLConfirmResponse, 1)
 
-		// Esc 取消监听
-		escDone := make(chan struct{})
-		go func() {
-			runWithEscCancel(ctx, cancel, escDone)
-		}()
+		// Only one terminal reader may be active; pause Esc polling for approvals.
+		var escCancel context.CancelFunc
+		var escDone chan struct{}
+		startEsc := func() {
+			var escCtx context.Context
+			escCtx, escCancel = context.WithCancel(ctx)
+			escDone = make(chan struct{})
+			go runWithEscCancel(escCtx, cancel, escDone)
+		}
+		stopEsc := func() { escCancel(); <-escDone }
+		startEsc()
 
 		// Agent 跑在另一个 goroutine
 		type agentResult struct {
@@ -460,55 +491,44 @@ func runInteractive(ag *agent.Agent, workspaceDir string, agentLogger *logger.Ag
 		for {
 			select {
 			case req := <-hitlReqCh:
+				stopEsc()
+				response := permission.HITLConfirmResponse{ReplyID: req.ReplyID}
 				for _, tc := range req.ToolCalls {
-					fmt.Printf("\n%s⚠️  Agent wants to run: %s%s%s%s\n", cBrightYellow, cBold, cBrightCyan, tc.Name, cReset)
-					fmt.Printf("   Args: %v\n", tc.Args)
-
-					fmt.Printf("   %s[y=yes / a=always allow / n=no]%s ", cDim, cReset)
-					reader := bufio.NewReader(os.Stdin)
-					text, _ := reader.ReadString('\n')
-					answer := strings.TrimSpace(strings.ToLower(text))
-
-					switch {
-					case answer == "y" || answer == "yes":
-						// 只这次允许
-						hitlRespCh <- permission.HITLConfirmResponse{
-							ReplyID: req.ReplyID,
-							Results: []permission.ToolConfirmResult{{
-								ToolCall:  tc,
-								Confirmed: true,
-							}},
-						}
-						fmt.Printf("   %s✅ Allowed (this time)%s\n", cGreen, cReset)
-
-					case answer == "a" || answer == "always":
-						// 永远允许 → 生成规则
-						rules := makeAllowRule(tc)
-						hitlRespCh <- permission.HITLConfirmResponse{
-							ReplyID: req.ReplyID,
-							Results: []permission.ToolConfirmResult{{
-								ToolCall:  tc,
-								Confirmed: true,
-								Rules:     rules,
-							}},
-						}
-						fmt.Printf("   %s✅ Allowed (always)%s\n", cGreen, cReset)
-						if len(rules) > 0 {
-							fmt.Printf("   %s📌 Rule added: %s %s → %s%s\n",
-								cDim, rules[0].ToolName, rules[0].RuleContent, rules[0].Behavior, cReset)
-						}
-
-					default:
-						// n 或任何其他 → 拒绝
-						hitlRespCh <- permission.HITLConfirmResponse{
-							ReplyID: req.ReplyID,
-							Results: []permission.ToolConfirmResult{{
-								ToolCall:  tc,
-								Confirmed: false,
-							}},
-						}
-						fmt.Printf("   %s❌ Denied%s\n", cRed, cReset)
+					fmt.Printf("\nAgent wants to run: %s\nArgs: %v\n", tc.Name, tc.Args)
+					answer, err := state.Prompt("[y=yes / a=always allow / n=no] ")
+					if err != nil {
+						cancel()
+						break
 					}
+					answer = strings.ToLower(strings.TrimSpace(answer))
+					confirmed := answer == "y" || answer == "yes" || answer == "a" || answer == "always"
+					var rules []permission.Rule
+					if answer == "a" || answer == "always" {
+						rules = makeAllowRule(tc)
+					}
+					response.Results = append(response.Results, permission.ToolConfirmResult{ToolCall: tc, Confirmed: confirmed, Rules: rules})
+				}
+				select {
+				case hitlRespCh <- response:
+				case <-ctx.Done():
+				}
+				startEsc()
+			case <-time.After(100 * time.Millisecond):
+				printForkEvents(forks)
+				if pending := forks.Pending(); len(pending) > 0 {
+					stopEsc()
+					for _, p := range pending {
+						answer, err := state.Prompt("[" + p.SessionID + "] approve? [y/a/N] ")
+						if err != nil {
+							cancel()
+							break
+						}
+						answer = strings.ToLower(strings.TrimSpace(answer))
+						if err := forks.Approve(p.SessionID, answer == "y" || answer == "a", answer == "a"); err != nil {
+							fmt.Println(err)
+						}
+					}
+					startEsc()
 				}
 
 			case result := <-agentDone:
@@ -517,12 +537,15 @@ func runInteractive(ag *agent.Agent, workspaceDir string, agentLogger *logger.Ag
 				break agentLoop
 
 			case <-ctx.Done():
+				result := <-agentDone
+				out = result.out
+				runErr = result.err
 				break agentLoop
 			}
 		}
 
 		cancel()
-		<-escDone
+		stopEsc()
 
 		if runErr != nil {
 			if runErr == context.Canceled {
@@ -540,9 +563,6 @@ func runInteractive(ag *agent.Agent, workspaceDir string, agentLogger *logger.Ag
 		}
 		if path := agentLogger.GetLogFilePath(); path != "" {
 			fmt.Printf("\n%s📝 Log file: %s%s%s\n", cDim, cReset, path, cReset)
-		}
-		if line != "" {
-			state.AppendHistory(line)
 		}
 	}
 }
@@ -589,6 +609,13 @@ func formatMarkdownForTerminal(s string) string {
 }
 
 func printHelp() {
+	fmt.Println("  /fork - Create and enter a new session with the current context")
+	fmt.Println("  /sessions - Choose a session with wheel/arrow keys")
+	fmt.Println("  /switch session-ID - Switch to main or another session")
+	fmt.Println("  /tasks [fork-ID] - Inspect background Agent tasks")
+	fmt.Println("  /send fork-ID <message> - Continue that fork's independent conversation")
+	fmt.Println("  /cancel fork-ID - Cancel a running fork")
+	fmt.Println("  /approve fork-ID y|a|n - Answer a fork's permission request")
 	fmt.Println("  /rewind [ID] [both|conversation|files] - Select a message or restore a turn")
 	fmt.Printf(`
 %sAvailable Commands:%s

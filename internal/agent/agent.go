@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"sync"
 
 	"diegoc-agent/internal/llm"
 	"diegoc-agent/internal/logger"
@@ -14,6 +16,13 @@ import (
 
 // Agent runs the conversation loop with optional tools and HITL support.
 type Agent struct {
+	needsToolRepair bool
+	forks           *ForkManager
+	isFork          bool
+	forkBatch       []schema.Message
+	inboxMu         sync.Mutex
+	forkReports     []ForkEvent
+
 	checkpoints        []checkpoint
 	checkpointSequence int
 	LLM                llm.Client
@@ -55,26 +64,31 @@ func NewWithPermission(client llm.Client, systemPrompt string, maxSteps int, tok
 	for _, t := range toolList {
 		byName[t.Name()] = t
 	}
-	engine := permission.NewEngine(&permCtx)
 	msgs := []schema.Message{
 		{Role: "system", Content: systemPrompt},
 	}
-	return &Agent{
-		LLM:              client,
-		SystemPrompt:     systemPrompt,
-		Messages:         msgs,
-		MaxSteps:         maxSteps,
-		TokenLimit:       tokenLimit,
-		Tools:            toolList,
-		toolByName:       byName,
-		PermissionCtx:    permCtx,
-		permissionEngine: engine,
-		toolCallStates:   make(map[string]permission.ToolCallState),
+	ag := &Agent{
+		LLM:            client,
+		SystemPrompt:   systemPrompt,
+		Messages:       msgs,
+		MaxSteps:       maxSteps,
+		TokenLimit:     tokenLimit,
+		Tools:          toolList,
+		toolByName:     byName,
+		PermissionCtx:  permCtx,
+		toolCallStates: make(map[string]permission.ToolCallState),
 	}
+	ag.permissionEngine = permission.NewEngine(&ag.PermissionCtx)
+	return ag
 }
 
 // AddUserMessage appends a user message.
 func (a *Agent) AddUserMessage(content string) {
+	if a.needsToolRepair {
+		a.cleanupPendingToolCalls()
+		a.needsToolRepair = false
+	}
+	a.deliverForkReports()
 	a.makeCheckpoint(content)
 	a.Messages = append(a.Messages, schema.Message{Role: "user", Content: content})
 }
@@ -102,8 +116,14 @@ func (a *Agent) runLoop(
 	ctx context.Context,
 	hitlInputCh <-chan permission.HITLConfirmResponse,
 	hitlEventCh chan<- permission.HITLConfirmRequest,
-) (string, error) {
+) (output string, runErr error) {
 
+	defer func() {
+		a.forkBatch = nil
+		if runErr != nil {
+			a.needsToolRepair = true
+		}
+	}()
 	if a.Logger != nil {
 		a.Logger.StartNewRun()
 	}
@@ -118,6 +138,7 @@ func (a *Agent) runLoop(
 		default:
 		}
 
+		a.deliverForkReports()
 		if a.memoryManager != nil {
 			// Phase 11-12: full memory pipeline
 			keptMsgs, summary, err := a.memoryManager.PreReasoningHook(ctx, a.Messages, a.SystemPrompt)
@@ -160,6 +181,9 @@ func (a *Agent) runLoop(
 			return resp.Content, nil
 		}
 
+		if a.forks != nil {
+			a.forkBatch = cloneMessages(a.Messages)
+		}
 		// 执行每个工具调用（带权限检查）
 		for _, tc := range resp.ToolCalls {
 			select {
@@ -196,6 +220,11 @@ func (a *Agent) runLoop(
 				a.executeAndAppend(ctx, tc, tool, args)
 
 			case permission.BehaviorASK:
+				if hitlInputCh == nil || hitlEventCh == nil {
+					a.appendToolError(tc, "Tool requires user approval; no permission handler is available")
+					a.toolCallStates[tc.ID] = permission.ToolCallFinished
+					continue
+				}
 
 				a.toolCallStates[tc.ID] = permission.ToolCallAsking
 
@@ -258,12 +287,24 @@ func (a *Agent) runLoop(
 				a.toolCallStates[tc.ID] = permission.ToolCallFinished
 			}
 		}
+		a.forkBatch = nil
+	}
+	if a.isFork {
+		return "", fmt.Errorf("fork reached maximum steps (%d) without a final response", a.MaxSteps)
 	}
 	return "", nil
 }
 
 // executeAndAppend 执行工具并将结果追加到消息列表。
 func (a *Agent) executeAndAppend(ctx context.Context, tc schema.ToolCall, tool tools.Tool, args map[string]interface{}) {
+	if a.forks != nil && tool.Name() != "Agent" {
+		a.forks.toolMu.Lock()
+		defer a.forks.toolMu.Unlock()
+	}
+	if err := ctx.Err(); err != nil {
+		a.appendToolError(tc, err.Error())
+		return
+	}
 	var result *tools.ToolResult
 	var execErr error
 	path, backupErr := a.trackBefore(tool, args)

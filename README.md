@@ -260,3 +260,28 @@ sudo rm /usr/local/bin/diegoc-agent
 检查点仅在当前进程中有效，`/clear` 会清空检查点和会话摘要；恢复对话会丢弃所选检查点及之后的检查点。只恢复文件会消费相应文件备份，保留对话检查点。Shell、MCP、外部服务操作、创建的空目录及长期记忆写入不回退。鼠标滚轮需要终端支持鼠标事件上报；也可使用方向键。此版本未提供双击 Esc 入口和跨进程恢复。
 
 实现参考本地 Claude-Code 的 `src/utils/fileHistory.ts`（用户回合检查点、写前备份、标记不存在的文件）和 `src/screens/REPL.tsx` 的 `rewindConversationTo`（恢复到用户输入之前）。本项目使用独立的 Go 实现，并在检查点保存对话与摘要副本，以支持上下文压缩后的回退。
+
+## Fork session（会话分叉与切换）
+
+直接输入 `/fork`，立即复制当前上下文并进入新 session，无需任务，也不会自动请求模型。
+
+```text
+You [main] › /fork
+You [session-1] › 在这个分支继续讨论
+You [session-1] › /switch main
+You [main] › 继续原来的对话
+You [main] › /switch session-1
+```
+
+- `/fork`：从当前 session 创建并进入新 session，支持再次分叉。
+- `/sessions` 或 `/switch`：用滚轮、方向键选择会话，回车切换，Esc 取消。
+- `/switch main`：回到原始主会话。
+- `/switch session-1`：回到指定 session（`/session ID` 也可）。
+
+提示符显示当前会话 ID。切换后会显示该会话自己的对话；直接输入普通消息即可继续聊天。后续消息、摘要、权限规则、日志和新建的 rewind 检查点各自独立，`/clear`、`/rewind` 只影响当前 session 的对话状态。代码文件和磁盘记忆仍共享；会话只在当前进程内保留。
+
+模型的 `Agent` 工具仍可创建后台任务；使用 `/tasks [fork-ID]`、`/send`、`/approve`、`/cancel` 管理。这与交互式 `/fork` 会话分叉是两个独立入口。
+
+详见 [Fork session](docs/FORK_SESSION.md)。
+
+交互式 fork session 最多 7 个（main 不计入，总计最多 8 个会话）。从 main 或已有 session 分叉均计入同一个上限；达到上限时不创建新会话，也不切换当前会话。

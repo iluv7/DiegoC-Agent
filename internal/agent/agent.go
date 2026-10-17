@@ -16,6 +16,7 @@ import (
 
 // Agent runs the conversation loop with optional tools and HITL support.
 type Agent struct {
+	PlanMode        bool
 	needsToolRepair bool
 	forks           *ForkManager
 	isFork          bool
@@ -45,6 +46,34 @@ type Agent struct {
 	permissionEngine *permission.Engine
 	replyID          string                              // 当前回复的 ID，关联 HITL request 和 response
 	toolCallStates   map[string]permission.ToolCallState // tool_call_id → 状态
+}
+
+// SetPlanMode switches the same ReAct agent between read-only planning and execution.
+// The permission context is restored to its prior mode when planning is approved.
+func (a *Agent) SetPlanMode(enabled bool) {
+	if enabled == a.PlanMode {
+		return
+	}
+	if enabled {
+		a.PermissionCtx.PrePlanMode = a.PermissionCtx.Mode
+		a.PermissionCtx.Mode = permission.ModeExplore
+	} else {
+		mode := a.PermissionCtx.PrePlanMode
+		if mode == "" || mode == permission.ModeExplore {
+			mode = permission.ModeDefault
+		}
+		a.PermissionCtx.Mode = mode
+	}
+	a.PlanMode = enabled
+	if len(a.Messages) > 0 {
+		base := a.SystemPrompt
+		if enabled {
+			base += "\n\n## Plan Mode\nExplore and reason before editing. Do not modify project files or run commands that change state. Write the complete proposed implementation plan to `.agent_plan.md` using `write_plan` when ready. Then summarize the plan and tell the user to approve it with `/execute`. If the request changes materially, update the plan first."
+		} else {
+			base += "\n\n## Execute Mode\nFollow the approved plan in `.agent_plan.md`. Implement it, verify the changes, and adapt to new user instructions."
+		}
+		a.Messages[0].Content = base
+	}
 }
 
 // New creates an Agent with system prompt and tools.
@@ -205,13 +234,22 @@ func (a *Agent) runLoop(
 			}
 
 			// ============== 权限检查 (HITL 插入点) ==============
-			decision := a.permissionEngine.CheckPermission(
-				tc.Function.Name,
-				func() permission.Decision {
-					return tool.CheckPermissions(args, &a.PermissionCtx)
-				},
-				args,
-			)
+			var decision permission.Decision
+			if a.PermissionCtx.Mode == permission.ModeExplore {
+				// Plan mode is a hard boundary: persisted allow rules must not make
+				// a mutating tool available while the agent is planning.
+				if tc.Function.Name == "write_plan" || tool.IsReadOnly() {
+					decision = permission.Decision{Behavior: permission.BehaviorALLOW, Message: "EXPLORE mode: planning/read-only tool allowed"}
+				} else {
+					decision = permission.Decision{Behavior: permission.BehaviorDENY, Message: "EXPLORE mode: mutating tools are disabled until the plan is approved"}
+				}
+			} else {
+				decision = a.permissionEngine.CheckPermission(
+					tc.Function.Name,
+					func() permission.Decision { return tool.CheckPermissions(args, &a.PermissionCtx) },
+					args,
+				)
+			}
 
 			switch decision.Behavior {
 			case permission.BehaviorALLOW:

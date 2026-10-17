@@ -60,11 +60,12 @@ type WorkingDirectory struct {
 
 // Context 保存当前会话的权限配置。
 type Context struct {
-	Mode               Mode                        `json:"mode"`                // 权限模式
-	WorkingDirectories map[string]WorkingDirectory `json:"working_directories"`  // 工作目录
-	AllowRules         map[string][]Rule           `json:"allow_rules"`          // toolName → 允许规则列表
-	DenyRules          map[string][]Rule           `json:"deny_rules"`           // toolName → 拒绝规则列表
-	AskRules           map[string][]Rule           `json:"ask_rules"`            // toolName → 询问规则列表
+	Mode               Mode                        `json:"mode"`                    // 权限模式
+	PrePlanMode        Mode                        `json:"pre_plan_mode,omitempty"` // Permission mode to restore after plan approval
+	WorkingDirectories map[string]WorkingDirectory `json:"working_directories"`     // 工作目录
+	AllowRules         map[string][]Rule           `json:"allow_rules"`             // toolName → 允许规则列表
+	DenyRules          map[string][]Rule           `json:"deny_rules"`              // toolName → 拒绝规则列表
+	AskRules           map[string][]Rule           `json:"ask_rules"`               // toolName → 询问规则列表
 }
 
 // NewContext 创建一个默认的权限上下文（DEFAULT 模式，空规则）。
@@ -123,9 +124,9 @@ type HITLConfirmRequest struct {
 
 // ToolConfirmResult 是用户对单个工具调用的确认结果。
 type ToolConfirmResult struct {
-	ToolCall  PendingToolCall `json:"tool_call"`  // 被确认的工具调用
-	Confirmed bool            `json:"confirmed"`  // 用户是否同意
-	Rules     []Rule          `json:"rules"`      // 用户选的"始终允许"规则
+	ToolCall  PendingToolCall `json:"tool_call"` // 被确认的工具调用
+	Confirmed bool            `json:"confirmed"` // 用户是否同意
+	Rules     []Rule          `json:"rules"`     // 用户选的"始终允许"规则
 }
 
 // HITLConfirmResponse 是调用者对 HITLConfirmRequest 的回复。

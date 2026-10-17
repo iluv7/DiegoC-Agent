@@ -167,6 +167,7 @@ func buildTools(cfg *config.Config, workspaceDir string) ([]tools.Tool, *tools.S
 			&tools.EditTool{WorkspaceDir: workspaceDir},
 		)
 	}
+	list = append(list, &tools.WritePlanTool{WorkspaceDir: workspaceDir})
 	if cfg.Tools.EnableBash {
 		list = append(list,
 			&tools.BashTool{WorkspaceDir: workspaceDir},
@@ -404,7 +405,28 @@ func runInteractive(ag *agent.Agent, workspaceDir string, agentLogger *logger.Ag
 
 		if strings.HasPrefix(line, "/") {
 			cmd := strings.ToLower(line)
-			if cmd == "/exit" || cmd == "/quit" || cmd == "/q" {
+			if cmd == "/plan" {
+				ag.SetPlanMode(true)
+				fmt.Println("\nPlan Mode enabled: project edits and state-changing commands are blocked. Describe the task; the agent will save its plan to .agent_plan.md. Use /execute to review and approve it.\n")
+				continue
+			}
+			if cmd == "/execute" {
+				planPath := filepath.Join(workspaceDir, ".agent_plan.md")
+				plan, err := os.ReadFile(planPath)
+				if err != nil {
+					fmt.Printf("\nNo plan found at %s. Enter Plan Mode with /plan and ask the agent to prepare one.\n\n", planPath)
+					continue
+				}
+				fmt.Printf("\nProposed plan (%s):\n\n%s\n", planPath, string(plan))
+				answer, err := state.Prompt("Approve this plan and begin execution? [y/N] ")
+				if err != nil || (strings.ToLower(strings.TrimSpace(answer)) != "y" && strings.ToLower(strings.TrimSpace(answer)) != "yes") {
+					fmt.Println("Plan not approved. Remain in Plan Mode; revise it or approve later with /execute.\n")
+					continue
+				}
+				ag.SetPlanMode(false)
+				fmt.Println("Plan approved. Starting execution...\n")
+				line = "The plan in .agent_plan.md is approved. Execute it now, verify the result, and report what changed."
+			} else if cmd == "/exit" || cmd == "/quit" || cmd == "/q" {
 				fmt.Printf("\n%s👋 Goodbye! Thanks for using %s%s%s\n\n", cBrightYellow, cBold, appName, cReset)
 				printStats(ag, sessionStart)
 				return
@@ -444,8 +466,10 @@ func runInteractive(ag *agent.Agent, workspaceDir string, agentLogger *logger.Ag
 				}
 				continue
 			}
-			fmt.Printf("%s❌ Unknown command: %s%s (type %s/help%s)\n\n", cRed, line, cReset, cBrightGreen, cReset)
-			continue
+			if cmd != "/execute" {
+				fmt.Printf("%s❌ Unknown command: %s%s (type %s/help%s)\n\n", cRed, line, cReset, cBrightGreen, cReset)
+				continue
+			}
 		}
 		if line == "exit" || line == "quit" || line == "q" {
 			fmt.Printf("\n%s👋 Goodbye! Thanks for using %s%s%s\n\n", cBrightYellow, cBold, appName, cReset)
@@ -609,6 +633,8 @@ func formatMarkdownForTerminal(s string) string {
 }
 
 func printHelp() {
+	fmt.Println("  /plan - Enter read-only Plan Mode")
+	fmt.Println("  /execute - Review the saved plan and approve execution")
 	fmt.Println("  /fork - Create and enter a new session with the current context")
 	fmt.Println("  /sessions - Choose a session with wheel/arrow keys")
 	fmt.Println("  /switch session-ID - Switch to main or another session")

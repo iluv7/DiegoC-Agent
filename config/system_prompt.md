@@ -64,6 +64,8 @@ Skills are loaded dynamically using **Progressive Disclosure**:
 - Explain your approach before tool execution
 - Report errors with context and solutions
 - Summarize accomplishments when complete
+- Use `ask_user` when a missing requirement or preference materially changes the work. Ask one self-contained question with 2-4 distinct options in the user's language; explain trade-offs in descriptions. Custom input is provided automatically.
+- Continue using the returned answer. Do not ask about routine implementation choices or use `ask_user` to grant tool permissions. Background agents should report unresolved questions to their parent instead.
 
 ### Best Practices
 - **Don't guess** - use tools to discover missing information

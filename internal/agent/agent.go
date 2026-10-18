@@ -235,7 +235,10 @@ func (a *Agent) runLoop(
 
 			// ============== 权限检查 (HITL 插入点) ==============
 			var decision permission.Decision
-			if a.PermissionCtx.Mode == permission.ModeExplore {
+			interactive, _ := tool.(tools.UserInteractionTool)
+			if interactive != nil && interactive.RequiresUserInteraction() && (a.isFork || a.PermissionCtx.Mode == permission.ModeDontAsk) {
+				decision = permission.Decision{Behavior: permission.BehaviorDENY, Message: "Interactive questions require a foreground attended run; report the question to the user or parent agent instead"}
+			} else if a.PermissionCtx.Mode == permission.ModeExplore {
 				// Plan mode is a hard boundary: persisted allow rules must not make
 				// a mutating tool available while the agent is planning.
 				if tc.Function.Name == "write_plan" || tool.IsReadOnly() {
@@ -324,6 +327,9 @@ func (a *Agent) runLoop(
 				a.appendToolError(tc, decision.Message)
 				a.toolCallStates[tc.ID] = permission.ToolCallFinished
 			}
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
 		}
 		a.forkBatch = nil
 	}
@@ -335,7 +341,9 @@ func (a *Agent) runLoop(
 
 // executeAndAppend 执行工具并将结果追加到消息列表。
 func (a *Agent) executeAndAppend(ctx context.Context, tc schema.ToolCall, tool tools.Tool, args map[string]interface{}) {
-	if a.forks != nil && tool.Name() != "Agent" {
+	interactive, _ := tool.(tools.UserInteractionTool)
+	waitsForUser := interactive != nil && interactive.RequiresUserInteraction()
+	if a.forks != nil && tool.Name() != "Agent" && !waitsForUser {
 		a.forks.toolMu.Lock()
 		defer a.forks.toolMu.Unlock()
 	}

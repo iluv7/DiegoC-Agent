@@ -105,12 +105,17 @@ func selectorText(text string, width int) string {
 
 // selectRewindOption owns terminal input only until selection/cancellation.
 func selectRewindOption(title string, options []string, initial int) (int, error) {
+	return selectTerminalOption(title, options, initial, nil)
+}
+
+// details adds a wrapped question and the focused option's explanation.
+func selectTerminalOption(title string, options []string, initial int, details []string) (int, error) {
 	if len(options) == 0 {
 		return -1, nil
 	}
 	f, ok := stdinFile()
 	if !ok || !term.IsTerminal(int(os.Stdout.Fd())) {
-		return -1, fmt.Errorf("interactive selector requires a terminal; use /rewind ID [both|conversation|files]")
+		return -1, fmt.Errorf("interactive selector requires a terminal")
 	}
 	old, err := term.MakeRaw(int(f.Fd()))
 	if err != nil {
@@ -120,6 +125,9 @@ func selectRewindOption(title string, options []string, initial int) (int, error
 	fmt.Print("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h")
 	defer fmt.Print("\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l")
 	selected := initial
+	if selected < 0 || selected >= len(options) {
+		selected = 0
+	}
 	for {
 		width, height, err := term.GetSize(int(os.Stdout.Fd()))
 		if err != nil {
@@ -131,7 +139,14 @@ func selectRewindOption(title string, options []string, initial int) (int, error
 		if height < 5 {
 			height = 5
 		}
-		visible := height - 4
+		header := []string{selectorText(title, width-1)}
+		if len(details) == len(options) {
+			header = questionHeader(title, details[selected], width-1, height/2)
+		}
+		visible := height - len(header) - 3
+		if visible < 1 {
+			visible = 1
+		}
 		start := selected - visible/2
 		if start < 0 {
 			start = 0
@@ -143,7 +158,10 @@ func selectRewindOption(title string, options []string, initial int) (int, error
 			start = 0
 		}
 		fmt.Print("\x1b[H\x1b[2J")
-		fmt.Printf("%s\r\nWheel / ↑ ↓: select · Enter: confirm · Esc: cancel\r\n\r\n", selectorText(title, width-1))
+		for _, line := range header {
+			fmt.Printf("%s\r\n", line)
+		}
+		fmt.Printf("%s\r\n\r\n", selectorText("Wheel / ↑ ↓: select · Enter: confirm · Esc: cancel", width-1))
 		for i := start; i < len(options) && i < start+visible; i++ {
 			if i == selected {
 				fmt.Printf("\x1b[7m› %s\x1b[0m\r\n", selectorText(options[i], width-3))

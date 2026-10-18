@@ -157,7 +157,7 @@ func main() {
 }
 
 func buildTools(cfg *config.Config, workspaceDir string) ([]tools.Tool, *tools.SkillLoader) {
-	var list []tools.Tool
+	list := []tools.Tool{&tools.AskUserTool{}}
 	var skillLoader *tools.SkillLoader
 
 	if cfg.Tools.EnableFileTools {
@@ -407,7 +407,7 @@ func runInteractive(ag *agent.Agent, workspaceDir string, agentLogger *logger.Ag
 			cmd := strings.ToLower(line)
 			if cmd == "/plan" {
 				ag.SetPlanMode(true)
-				fmt.Println("\nPlan Mode enabled: project edits and state-changing commands are blocked. Describe the task; the agent will save its plan to .agent_plan.md. Use /execute to review and approve it.\n")
+				fmt.Print("\nPlan Mode enabled: project edits and state-changing commands are blocked. Describe the task; the agent will save its plan to .agent_plan.md. Use /execute to review and approve it.\n\n")
 				continue
 			}
 			if cmd == "/execute" {
@@ -420,11 +420,11 @@ func runInteractive(ag *agent.Agent, workspaceDir string, agentLogger *logger.Ag
 				fmt.Printf("\nProposed plan (%s):\n\n%s\n", planPath, string(plan))
 				answer, err := state.Prompt("Approve this plan and begin execution? [y/N] ")
 				if err != nil || (strings.ToLower(strings.TrimSpace(answer)) != "y" && strings.ToLower(strings.TrimSpace(answer)) != "yes") {
-					fmt.Println("Plan not approved. Remain in Plan Mode; revise it or approve later with /execute.\n")
+					fmt.Print("Plan not approved. Remain in Plan Mode; revise it or approve later with /execute.\n\n")
 					continue
 				}
 				ag.SetPlanMode(false)
-				fmt.Println("Plan approved. Starting execution...\n")
+				fmt.Print("Plan approved. Starting execution...\n\n")
 				line = "The plan in .agent_plan.md is approved. Execute it now, verify the result, and report what changed."
 			} else if cmd == "/exit" || cmd == "/quit" || cmd == "/q" {
 				fmt.Printf("\n%s👋 Goodbye! Thanks for using %s%s%s\n\n", cBrightYellow, cBold, appName, cReset)
@@ -480,6 +480,10 @@ func runInteractive(ag *agent.Agent, workspaceDir string, agentLogger *logger.Ag
 		ag.AddUserMessage(line)
 		fmt.Println("\nAgent › Thinking... (Esc to cancel)")
 		ctx, cancel := context.WithCancel(context.Background())
+		questionRequests := make(chan userQuestionRequest)
+		ctx = tools.WithUserQuestionHandler(ctx, func(ctx context.Context, question tools.UserQuestion) (tools.UserAnswer, error) {
+			return requestUserAnswer(ctx, questionRequests, question)
+		})
 
 		// HITL 通道
 		hitlReqCh := make(chan permission.HITLConfirmRequest, 1)
@@ -514,6 +518,21 @@ func runInteractive(ag *agent.Agent, workspaceDir string, agentLogger *logger.Ag
 	agentLoop:
 		for {
 			select {
+			case req := <-questionRequests:
+				stopEsc()
+				if err := ctx.Err(); err != nil {
+					req.Reply <- userQuestionResponse{Err: err}
+					startEsc()
+					continue
+				}
+				answer, err := collectUserAnswer(req.Question, selectUserQuestion, func(prompt string) (string, error) {
+					return promptSessionInput(state, forks, nil, prompt, true)
+				})
+				if err != nil {
+					cancel()
+				}
+				req.Reply <- userQuestionResponse{Answer: answer, Err: err}
+				startEsc()
 			case req := <-hitlReqCh:
 				stopEsc()
 				response := permission.HITLConfirmResponse{ReplyID: req.ReplyID}

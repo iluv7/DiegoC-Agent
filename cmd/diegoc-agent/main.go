@@ -326,7 +326,7 @@ func runLogSubcommand(filename string) {
 	fmt.Printf("%s%s%s\n", cDim, strings.Repeat("─", 80), cReset)
 }
 
-var slashCommands = []string{"/fork", "/sessions", "/switch", "/session", "/tasks", "/send", "/cancel", "/approve", "/help", "/rewind", "/clear", "/history", "/stats", "/log", "/exit", "/quit", "/q"}
+var slashCommands = []string{"/fork", "/sessions", "/switch", "/session", "/tasks", "/send", "/cancel", "/approve", "/help", "/rewind", "/clear", "/history", "/stats", "/context", "/compact", "/plan", "/execute", "/log", "/exit", "/quit", "/q"}
 
 func runInteractive(ag *agent.Agent, workspaceDir string, agentLogger *logger.AgentLogger) {
 	sessionStart := time.Now()
@@ -400,6 +400,9 @@ func runInteractive(ag *agent.Agent, workspaceDir string, agentLogger *logger.Ag
 			continue
 		}
 		if handleBackgroundCommand(forks, line) {
+			continue
+		}
+		if handleContextCommand(ag, line) {
 			continue
 		}
 
@@ -652,6 +655,8 @@ func formatMarkdownForTerminal(s string) string {
 }
 
 func printHelp() {
+	fmt.Println("  /context - Show estimated current context usage and configured budget")
+	fmt.Println("  /compact [instructions] - Summarize conversation, optionally preserving specified details")
 	fmt.Println("  /plan - Enter read-only Plan Mode")
 	fmt.Println("  /execute - Review the saved plan and approve execution")
 	fmt.Println("  /fork - Create and enter a new session with the current context")

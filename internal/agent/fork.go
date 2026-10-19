@@ -103,6 +103,8 @@ func (m *ForkManager) Fork(parent *Agent, task string) (string, error) {
 	child := NewWithPermission(parent.LLM, parent.SystemPrompt, parent.MaxSteps, parent.TokenLimit, list, copyPermission(parent.PermissionCtx))
 	child.Messages = buildForkMessages(history, task)
 	child.compressedSummary = parent.compressedSummary
+	child.contextLimit = parent.contextLimit
+	child.compactLanguage = parent.compactLanguage
 	child.skipNextTokenCheck = true // Preserve the inherited API prefix on the first request.
 	child.isFork = true
 	child.forks = m

@@ -15,13 +15,13 @@ import (
 // Config holds memory pipeline configuration.
 // Defined here (not in config package) to avoid circular imports.
 type Config struct {
-	WorkingDir      string // e.g. ".reme"
-	MaxInputLength  int    // model max input tokens (default 128000)
+	WorkingDir      string  // e.g. ".reme"
+	MaxInputLength  int     // model max input tokens (default 128000)
 	CompactRatio    float64 // threshold ratio before compaction triggers (default 0.7)
-	CompactReserve  int    // tokens to reserve for recent context (default 10000)
-	ToolResultKeepN int    // keep N most recent tool_results un-truncated (default 3)
-	Language        string // "zh" or "" for en
-	RetentionDays   int    // tool_result file retention (default 3)
+	CompactReserve  int     // tokens to reserve for recent context (default 10000)
+	ToolResultKeepN int     // keep N most recent tool_results un-truncated (default 3)
+	Language        string  // "zh" or "" for en
+	RetentionDays   int     // tool_result file retention (default 3)
 }
 
 // DefaultConfig returns a Config populated with sensible defaults.
@@ -177,29 +177,29 @@ func (m *Manager) PreReasoningHook(ctx context.Context, messages []schema.Messag
 	// ---- Step 5: Sync structured summary ----
 	prevSummary := m.inMemory.CompressedSummary()
 	newSummary := m.compactor.Compact(ctx, m.llmClient, toCompact, prevSummary)
-	if newSummary != "" {
-		m.inMemory.SetCompressedSummary(newSummary)
+	if newSummary == "" {
+		return processed, "", nil
 	}
+	m.inMemory.SetCompressedSummary(newSummary)
 
 	// ---- Step 6: Build final message list ----
-	// Prepend summary as a system block (matching InMemoryMemory.GetMemory format).
+	// Keep the summary separate from system instructions for both API providers.
 	result := make([]schema.Message, 0, len(toKeep)+2)
 
-	// system prompt is always first
-	if len(toKeep) > 0 && toKeep[0].Role == "system" {
-		result = append(result, toKeep[0])
-		toKeep = toKeep[1:]
+	// Always retain system instructions, even when the split put them in toCompact.
+	for _, msg := range processed {
+		if msg.Role == "system" && !IsSummaryMessage(msg) {
+			result = append(result, msg)
+		}
 	}
 
-	// Insert summary if available
-	if newSummary != "" {
-		result = append(result, schema.Message{
-			Role:    "system",
-			Content: "# Summary of previous conversation\n" + newSummary,
-		})
+	// Replace previous summaries rather than duplicating them in the kept tail.
+	result = append(result, SummaryMessage(newSummary))
+	for _, msg := range toKeep {
+		if msg.Role != "system" && !IsSummaryMessage(msg) {
+			result = append(result, msg)
+		}
 	}
-
-	result = append(result, toKeep...)
 	return result, newSummary, nil
 }
 

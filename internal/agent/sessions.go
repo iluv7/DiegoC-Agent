@@ -61,6 +61,8 @@ func (a *Agent) cloneConversation() *Agent {
 	child := NewWithPermission(a.LLM, a.SystemPrompt, a.MaxSteps, a.TokenLimit, append([]tools.Tool(nil), a.Tools...), copyPermission(a.PermissionCtx))
 	child.Messages = cloneMessages(a.Messages)
 	child.compressedSummary = a.compressedSummary
+	child.contextLimit = a.contextLimit
+	child.compactLanguage = a.compactLanguage
 	if a.memoryManager != nil {
 		child.compressedSummary = a.memoryManager.CompressedSummary()
 	}

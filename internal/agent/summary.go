@@ -14,8 +14,8 @@ func (a *Agent) summarizeIfNeeded(ctx context.Context) error {
 		a.skipNextTokenCheck = false
 		return nil
 	}
-	estimated := estimateTokens(a.Messages)
-	if estimated <= a.TokenLimit && a.APITotalTokens <= a.TokenLimit {
+	estimated := a.ContextUsage().Total
+	if estimated <= a.TokenLimit {
 		return nil
 	}
 

@@ -106,18 +106,29 @@ func main() {
 	if *workspace != "" {
 		workspaceDir = *workspace
 	}
-	workspaceDir, _ = filepath.Abs(expandHome(workspaceDir))
-	_ = os.MkdirAll(workspaceDir, 0755)
+	workspaceDir, err = filepath.Abs(expandHome(workspaceDir))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Workspace error: %v\n", err)
+		os.Exit(1)
+	}
+	if err := os.MkdirAll(workspaceDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "Workspace error: %v\n", err)
+		os.Exit(1)
+	}
 
 	toolList, skillLoader := buildTools(cfg, workspaceDir)
+	var skillsMetadata string
 	if skillLoader != nil {
-		meta := skillLoader.GetSkillsMetadataPrompt()
-		systemPrompt = strings.ReplaceAll(systemPrompt, "{SKILLS_METADATA}", meta)
-	} else {
-		systemPrompt = strings.ReplaceAll(systemPrompt, "{SKILLS_METADATA}", "")
+		skillsMetadata = skillLoader.GetSkillsMetadataPrompt()
 	}
-	workspaceInfo := "\n\n## Current Workspace\nYou are working in: `" + workspaceDir + "`\n"
-	systemPrompt += workspaceInfo
+	systemPrompt, instructionsPath, err := buildSystemPrompt(systemPrompt, workspaceDir, skillsMetadata)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Project instructions error: %v\n", err)
+		os.Exit(1)
+	}
+	if instructionsPath != "" {
+		fmt.Printf("Loaded project instructions: %s\n", selectorText(instructionsPath, 10000))
+	}
 
 	// Phase 11-13: Memory pipeline (optional, opt-in via config)
 	var memManager *memory.Manager

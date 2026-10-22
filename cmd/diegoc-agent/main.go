@@ -337,7 +337,7 @@ func runLogSubcommand(filename string) {
 	fmt.Printf("%s%s%s\n", cDim, strings.Repeat("─", 80), cReset)
 }
 
-var slashCommands = []string{"/fork", "/sessions", "/switch", "/session", "/tasks", "/send", "/cancel", "/approve", "/help", "/rewind", "/clear", "/history", "/stats", "/context", "/compact", "/plan", "/execute", "/log", "/exit", "/quit", "/q"}
+var slashCommands = []string{"/fork", "/sessions", "/switch", "/session", "/tasks", "/send", "/cancel", "/approve", "/help", "/rewind", "/diff", "/clear", "/history", "/stats", "/context", "/compact", "/plan", "/execute", "/log", "/exit", "/quit", "/q"}
 
 func runInteractive(ag *agent.Agent, workspaceDir string, agentLogger *logger.AgentLogger) {
 	sessionStart := time.Now()
@@ -414,6 +414,9 @@ func runInteractive(ag *agent.Agent, workspaceDir string, agentLogger *logger.Ag
 			continue
 		}
 		if handleContextCommand(ag, line) {
+			continue
+		}
+		if handleDiffCommand(ag, workspaceDir, line) {
 			continue
 		}
 
@@ -666,6 +669,7 @@ func formatMarkdownForTerminal(s string) string {
 }
 
 func printHelp() {
+	fmt.Println("  /diff [turn-ID|git] - Show recorded turn changes or Git staged/unstaged changes")
 	fmt.Println("  /context - Show estimated current context usage and configured budget")
 	fmt.Println("  /compact [instructions] - Summarize conversation, optionally preserving specified details")
 	fmt.Println("  /plan - Enter read-only Plan Mode")

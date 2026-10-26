@@ -15,6 +15,7 @@ import (
 	"diegoc-agent/internal/config"
 	"diegoc-agent/internal/llm"
 	"diegoc-agent/internal/logger"
+	"diegoc-agent/internal/loop"
 	"diegoc-agent/internal/memory"
 	"diegoc-agent/internal/permission"
 	"diegoc-agent/internal/schema"
@@ -168,7 +169,7 @@ func main() {
 }
 
 func buildTools(cfg *config.Config, workspaceDir string) ([]tools.Tool, *tools.SkillLoader) {
-	list := []tools.Tool{&tools.AskUserTool{}}
+	list := append([]tools.Tool{&tools.AskUserTool{}}, tools.LoopTools()...)
 	var skillLoader *tools.SkillLoader
 
 	if cfg.Tools.EnableFileTools {
@@ -337,9 +338,13 @@ func runLogSubcommand(filename string) {
 	fmt.Printf("%s%s%s\n", cDim, strings.Repeat("─", 80), cReset)
 }
 
-var slashCommands = []string{"/fork", "/sessions", "/switch", "/session", "/tasks", "/send", "/cancel", "/approve", "/help", "/rewind", "/diff", "/clear", "/history", "/stats", "/context", "/compact", "/plan", "/execute", "/log", "/exit", "/quit", "/q"}
+var slashCommands = []string{"/fork", "/sessions", "/switch", "/session", "/tasks", "/send", "/cancel", "/approve", "/help", "/rewind", "/diff", "/loop", "/clear", "/history", "/stats", "/context", "/compact", "/plan", "/execute", "/log", "/exit", "/quit", "/q"}
 
 func runInteractive(ag *agent.Agent, workspaceDir string, agentLogger *logger.AgentLogger) {
+	runInteractiveWithLoops(ag, workspaceDir, agentLogger, loop.New(nil))
+}
+
+func runInteractiveWithLoops(ag *agent.Agent, workspaceDir string, agentLogger *logger.AgentLogger, loops *loop.Scheduler) {
 	sessionStart := time.Now()
 	forks := agent.NewForkManager(context.Background())
 	defer forks.Close()
@@ -348,6 +353,7 @@ func runInteractive(ag *agent.Agent, workspaceDir string, agentLogger *logger.Ag
 	defer sessions.Close()
 	histories := map[string][]string{}
 	var inputHistory []string
+	drafts := map[string]*inputDraft{}
 	printBanner(workspaceDir)
 
 	state := liner.NewLiner()
@@ -388,7 +394,21 @@ func runInteractive(ag *agent.Agent, workspaceDir string, agentLogger *logger.Ag
 		agentLogger = ag.Logger
 		inputHistory = histories[current.ID]
 		// liner 不接受含 ANSI 转义的 prompt，会报 "invalid prompt"，故用纯文本
-		line, err := promptSessionInput(state, forks, inputHistory, "You ["+current.ID+"] › ", false)
+		if drafts[current.ID] == nil {
+			drafts[current.ID] = &inputDraft{}
+		}
+		line, err := promptSessionInputUntil(state, forks, inputHistory, "You ["+current.ID+"] › ", false, drafts[current.ID], func() bool { return loops.HasDue(current.ID) })
+		var scheduled *loop.Task
+		if errors.Is(err, errLoopDue) {
+			task, ok := loops.TakeDue(current.ID)
+			if !ok {
+				continue
+			}
+			scheduled = &task
+			line = fmt.Sprintf("[Scheduled loop %s, run %d]\n%s\n\nUse loop_cancel with id=%s if this recurring task is complete.", task.ID, task.Runs, task.Prompt, task.ID)
+			err = nil
+			fmt.Printf("\n[%s] Running in [%s]: %s\n", task.ID, current.ID, selectorText(task.Prompt, 160))
+		}
 		if err != nil {
 			if err == liner.ErrPromptAborted {
 				fmt.Printf("\n%s👋 Interrupt, exiting...%s\n\n", cBrightYellow, cReset)
@@ -404,99 +424,108 @@ func runInteractive(ag *agent.Agent, workspaceDir string, agentLogger *logger.Ag
 			continue
 		}
 
-		inputHistory = append(inputHistory, line)
-		histories[current.ID] = inputHistory
-		state.AppendHistory(line)
-		if handleSessionCommand(sessions, line, selectRewindOption) {
-			continue
-		}
-		if handleBackgroundCommand(forks, line) {
-			continue
-		}
-		if handleContextCommand(ag, line) {
-			continue
-		}
-		if handleDiffCommand(ag, workspaceDir, line) {
-			continue
-		}
-
-		if strings.HasPrefix(line, "/") {
-			cmd := strings.ToLower(line)
-			if cmd == "/plan" {
-				ag.SetPlanMode(true)
-				fmt.Print("\nPlan Mode enabled: project edits and state-changing commands are blocked. Describe the task; the agent will save its plan to .agent_plan.md. Use /execute to review and approve it.\n\n")
+		if scheduled == nil {
+			inputHistory = append(inputHistory, line)
+			histories[current.ID] = inputHistory
+			state.AppendHistory(line)
+			if handleLoopCommand(loops, current.ID, workspaceDir, line) {
 				continue
 			}
-			if cmd == "/execute" {
-				planPath := filepath.Join(workspaceDir, ".agent_plan.md")
-				plan, err := os.ReadFile(planPath)
-				if err != nil {
-					fmt.Printf("\nNo plan found at %s. Enter Plan Mode with /plan and ask the agent to prepare one.\n\n", planPath)
+			if handleSessionCommand(sessions, line, selectRewindOption) {
+				continue
+			}
+			if handleBackgroundCommand(forks, line) {
+				continue
+			}
+			if handleContextCommand(ag, line) {
+				continue
+			}
+			if handleDiffCommand(ag, workspaceDir, line) {
+				continue
+			}
+
+			if strings.HasPrefix(line, "/") {
+				cmd := strings.ToLower(line)
+				if cmd == "/plan" {
+					ag.SetPlanMode(true)
+					fmt.Print("\nPlan Mode enabled: project edits and state-changing commands are blocked. Describe the task; the agent will save its plan to .agent_plan.md. Use /execute to review and approve it.\n\n")
 					continue
 				}
-				fmt.Printf("\nProposed plan (%s):\n\n%s\n", planPath, string(plan))
-				answer, err := state.Prompt("Approve this plan and begin execution? [y/N] ")
-				if err != nil || (strings.ToLower(strings.TrimSpace(answer)) != "y" && strings.ToLower(strings.TrimSpace(answer)) != "yes") {
-					fmt.Print("Plan not approved. Remain in Plan Mode; revise it or approve later with /execute.\n\n")
+				if cmd == "/execute" {
+					planPath := filepath.Join(workspaceDir, ".agent_plan.md")
+					plan, err := os.ReadFile(planPath)
+					if err != nil {
+						fmt.Printf("\nNo plan found at %s. Enter Plan Mode with /plan and ask the agent to prepare one.\n\n", planPath)
+						continue
+					}
+					fmt.Printf("\nProposed plan (%s):\n\n%s\n", planPath, string(plan))
+					answer, err := state.Prompt("Approve this plan and begin execution? [y/N] ")
+					if err != nil || (strings.ToLower(strings.TrimSpace(answer)) != "y" && strings.ToLower(strings.TrimSpace(answer)) != "yes") {
+						fmt.Print("Plan not approved. Remain in Plan Mode; revise it or approve later with /execute.\n\n")
+						continue
+					}
+					ag.SetPlanMode(false)
+					fmt.Print("Plan approved. Starting execution...\n\n")
+					line = "The plan in .agent_plan.md is approved. Execute it now, verify the result, and report what changed."
+				} else if cmd == "/exit" || cmd == "/quit" || cmd == "/q" {
+					fmt.Printf("\n%s👋 Goodbye! Thanks for using %s%s%s\n\n", cBrightYellow, cBold, appName, cReset)
+					printStats(ag, sessionStart)
+					return
+				}
+				if cmd == "/rewind" || strings.HasPrefix(cmd, "/rewind ") {
+					handleRewind(ag, state, line)
 					continue
 				}
-				ag.SetPlanMode(false)
-				fmt.Print("Plan approved. Starting execution...\n\n")
-				line = "The plan in .agent_plan.md is approved. Execute it now, verify the result, and report what changed."
-			} else if cmd == "/exit" || cmd == "/quit" || cmd == "/q" {
+				if cmd == "/help" {
+					printHelp()
+					continue
+				}
+				if cmd == "/clear" {
+					if count := loops.Cancel(current.ID, "all"); count > 0 {
+						fmt.Printf("Cancelled %d loop(s) in [%s].\n", count, current.ID)
+					}
+					oldCount := len(ag.Messages)
+					if oldCount > 1 {
+						ag.ClearConversation()
+						fmt.Printf("%s✅ Cleared %d messages, new session.%s\n\n", cGreen, oldCount-1, cReset)
+					} else {
+						fmt.Printf("%sHistory already empty.%s\n\n", cDim, cReset)
+					}
+					continue
+				}
+				if cmd == "/history" {
+					fmt.Printf("\n%sCurrent session message count: %s%s%d%s\n\n", cBrightCyan, cReset, cBold, len(ag.Messages), cReset)
+					continue
+				}
+				if cmd == "/stats" {
+					printStats(ag, sessionStart)
+					continue
+				}
+				if cmd == "/log" || strings.HasPrefix(cmd, "/log ") {
+					parts := strings.SplitN(line, " ", 2)
+					if len(parts) == 1 {
+						showLogDirectory(agentLogger)
+					} else {
+						readLogFile(agentLogger.LogDir(), strings.Trim(strings.TrimSpace(parts[1]), "\"'"))
+					}
+					continue
+				}
+				if cmd != "/execute" {
+					fmt.Printf("%s❌ Unknown command: %s%s (type %s/help%s)\n\n", cRed, line, cReset, cBrightGreen, cReset)
+					continue
+				}
+			}
+			if line == "exit" || line == "quit" || line == "q" {
 				fmt.Printf("\n%s👋 Goodbye! Thanks for using %s%s%s\n\n", cBrightYellow, cBold, appName, cReset)
 				printStats(ag, sessionStart)
 				return
 			}
-			if cmd == "/rewind" || strings.HasPrefix(cmd, "/rewind ") {
-				handleRewind(ag, state, line)
-				continue
-			}
-			if cmd == "/help" {
-				printHelp()
-				continue
-			}
-			if cmd == "/clear" {
-				oldCount := len(ag.Messages)
-				if oldCount > 1 {
-					ag.ClearConversation()
-					fmt.Printf("%s✅ Cleared %d messages, new session.%s\n\n", cGreen, oldCount-1, cReset)
-				} else {
-					fmt.Printf("%sHistory already empty.%s\n\n", cDim, cReset)
-				}
-				continue
-			}
-			if cmd == "/history" {
-				fmt.Printf("\n%sCurrent session message count: %s%s%d%s\n\n", cBrightCyan, cReset, cBold, len(ag.Messages), cReset)
-				continue
-			}
-			if cmd == "/stats" {
-				printStats(ag, sessionStart)
-				continue
-			}
-			if cmd == "/log" || strings.HasPrefix(cmd, "/log ") {
-				parts := strings.SplitN(line, " ", 2)
-				if len(parts) == 1 {
-					showLogDirectory(agentLogger)
-				} else {
-					readLogFile(agentLogger.LogDir(), strings.Trim(strings.TrimSpace(parts[1]), "\"'"))
-				}
-				continue
-			}
-			if cmd != "/execute" {
-				fmt.Printf("%s❌ Unknown command: %s%s (type %s/help%s)\n\n", cRed, line, cReset, cBrightGreen, cReset)
-				continue
-			}
-		}
-		if line == "exit" || line == "quit" || line == "q" {
-			fmt.Printf("\n%s👋 Goodbye! Thanks for using %s%s%s\n\n", cBrightYellow, cBold, appName, cReset)
-			printStats(ag, sessionStart)
-			return
 		}
 
 		ag.AddUserMessage(line)
 		fmt.Println("\nAgent › Thinking... (Esc to cancel)")
 		ctx, cancel := context.WithCancel(context.Background())
+		ctx = tools.WithLoopSession(ctx, loops, current.ID)
 		questionRequests := make(chan userQuestionRequest)
 		ctx = tools.WithUserQuestionHandler(ctx, func(ctx context.Context, question tools.UserQuestion) (tools.UserAnswer, error) {
 			return requestUserAnswer(ctx, questionRequests, question)
@@ -606,6 +635,13 @@ func runInteractive(ag *agent.Agent, workspaceDir string, agentLogger *logger.Ag
 
 		cancel()
 		stopEsc()
+		if scheduled != nil {
+			loops.Complete(current.ID, scheduled.ID)
+			if runErr != nil {
+				loops.Cancel(current.ID, scheduled.ID)
+				fmt.Printf("[%s] Stopped after cancellation or error.\n", scheduled.ID)
+			}
+		}
 
 		if runErr != nil {
 			if runErr == context.Canceled {
@@ -621,8 +657,10 @@ func runInteractive(ag *agent.Agent, workspaceDir string, agentLogger *logger.Ag
 		} else if out != "" {
 			fmt.Printf("\n%s🤖 Agent%s %s›%s\n%s\n", cBold, cReset, cDim, cReset, formatMarkdownForTerminal(out))
 		}
-		if path := agentLogger.GetLogFilePath(); path != "" {
-			fmt.Printf("\n%s📝 Log file: %s%s%s\n", cDim, cReset, path, cReset)
+		if agentLogger != nil {
+			if path := agentLogger.GetLogFilePath(); path != "" {
+				fmt.Printf("\n%s📝 Log file: %s%s%s\n", cDim, cReset, path, cReset)
+			}
 		}
 	}
 }
@@ -669,6 +707,9 @@ func formatMarkdownForTerminal(s string) string {
 }
 
 func printHelp() {
+	fmt.Println("  /loop [interval] [prompt] - Repeat a prompt (default 10m; s/m/h/d, minimum 1m)")
+	fmt.Println("  /loop list - List this session's loops and next run times")
+	fmt.Println("  /loop cancel loop-ID|all - Stop loops in this session")
 	fmt.Println("  /diff [turn-ID|git] - Show recorded turn changes or Git staged/unstaged changes")
 	fmt.Println("  /context - Show estimated current context usage and configured budget")
 	fmt.Println("  /compact [instructions] - Summarize conversation, optionally preserving specified details")

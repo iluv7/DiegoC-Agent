@@ -1,10 +1,12 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -55,6 +57,19 @@ func promptWithForkEvents(state *liner.State, manager *agent.ForkManager, histor
 }
 
 func promptSessionInput(state *liner.State, manager *agent.ForkManager, history []string, prompt string, cancelOnEsc bool) (string, error) {
+	return promptSessionInputUntil(state, manager, history, prompt, cancelOnEsc, nil, nil)
+}
+
+var errLoopDue = errors.New("scheduled loop is due")
+
+type inputDraft struct {
+	Text   string
+	Cursor int
+}
+
+// Wakeups share the terminal's single input owner. Returning restores cooked
+// mode before a scheduled Agent turn begins, preserving the draft and cursor.
+func promptSessionInputUntil(state *liner.State, manager *agent.ForkManager, history []string, prompt string, cancelOnEsc bool, saved *inputDraft, ready func() bool) (string, error) {
 	f, ok := stdinFile()
 	if !ok || !term.IsTerminal(int(os.Stdout.Fd())) {
 		printForkEvents(manager)
@@ -69,6 +84,14 @@ func promptSessionInput(state *liner.State, manager *agent.ForkManager, history 
 	defer fmt.Print("\x1b[?2004l")
 	var text []rune
 	pos := 0
+	if saved != nil {
+		text = []rune(saved.Text)
+		pos = saved.Cursor
+		if pos < 0 || pos > len(text) {
+			pos = len(text)
+		}
+		*saved = inputDraft{}
+	}
 	historyPos := len(history)
 	draft := ""
 	paste := false
@@ -96,9 +119,18 @@ func promptSessionInput(state *liner.State, manager *agent.ForkManager, history 
 	}
 	draw()
 	var encoded []byte
+	lastInput := time.Now()
 	for {
 		if printForkEvents(manager) {
 			draw()
+		}
+		// Give active typing priority and never split a paste or UTF-8 rune.
+		if ready != nil && !paste && len(encoded) == 0 && time.Since(lastInput) >= time.Second && ready() {
+			if saved != nil {
+				*saved = inputDraft{Text: string(text), Cursor: pos}
+			}
+			fmt.Print("\r\x1b[2K\r\n")
+			return "", errLoopDue
 		}
 		b, ok, err := readTerminalByte(f, 100)
 		if err != nil {
@@ -107,6 +139,7 @@ func promptSessionInput(state *liner.State, manager *agent.ForkManager, history 
 		if !ok {
 			continue
 		}
+		lastInput = time.Now()
 		if b == 0x1b {
 			seq := "\x1b"
 			for len(seq) < 64 {

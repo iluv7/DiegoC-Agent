@@ -227,11 +227,38 @@ diegoc-agent/
 │   ├── mcp-example.json
 │   └── system_prompt.md
 ├── internal/            # 内部包
+├── scripts/test/        # 独立测试目录的运行入口
+├── tests/               # 按源码路径分组的 Go 测试
+│   ├── cmd/diegoc-agent/
+│   ├── internal/
+│   └── scripts/test/
 ├── skills/              # 技能模块
 ├── workspace/           # 工作目录
 ├── Makefile             # 构建脚本
 └── diegoc-agent         # 编译后的可执行文件
 ```
+
+---
+
+## 运行测试
+
+所有 Go 测试统一放在 `tests/`，并保留对应源码的相对路径，例如
+`tests/internal/agent/goal_test.go` 对应 `internal/agent/`。
+
+```bash
+make test
+# 只运行指定包的测试
+make test TEST_ARGS='./internal/agent'
+# 传递 Go 测试参数
+make test TEST_ARGS='-race -count=1 ./...'
+# 也可以直接调用运行器
+go run ./scripts/test -run TestCommandDispatch ./cmd/diegoc-agent
+```
+
+运行器通过 Go 的 `-overlay` 将测试编译到原包，保留对包内私有函数和状态的访问，
+不会把文件复制回源码目录。`tests/go.mod` 用于隔离测试存放目录；测试仍在根模块中运行。
+直接运行 `go test ./...` 不会加载 `tests/` 中的用例，请使用 `make test`。
+测试运行时的工作目录仍是对应源码包目录，新增测试数据时需按该目录解析相对路径。
 
 ---
 
@@ -325,7 +352,7 @@ You [main] › /switch session-1
 # 项目约定
 - 使用中文回答。
 - Go 文件使用 gofmt 格式化。
-- 修改后运行 go test ./...。
+- 修改后运行 make test。
 ```
 
 - 读取位置是 `--workspace` 指定的目录；未指定时使用配置里的 `workspace_dir`（默认 `./workspace`）。本版本只加载该目录下的 `AGENTS.md`，不扫描父目录或子目录。

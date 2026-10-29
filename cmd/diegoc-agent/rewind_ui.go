@@ -7,6 +7,8 @@ import (
 	"strings"
 	"unicode"
 
+	"diegoc-agent/internal/agent"
+
 	"github.com/mattn/go-runewidth"
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"
@@ -197,5 +199,86 @@ func selectTerminalOption(title string, options []string, initial int, details [
 		if selected >= len(options) {
 			selected = len(options) - 1
 		}
+	}
+}
+
+func handleRewind(ag *agent.Agent, state linePrompter, line string) {
+	parts := strings.Fields(line)
+	if len(parts) == 1 {
+		checkpoints := ag.Checkpoints()
+		if len(checkpoints) == 0 {
+			fmt.Println("No messages to rewind.")
+			return
+		}
+		options := make([]string, len(checkpoints))
+		for i, cp := range checkpoints {
+			options[i] = fmt.Sprintf("%d  %s", cp.ID, cp.Prompt)
+		}
+		selected, err := selectRewindOption("Rewind to before which message?", options, len(options)-1)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		if selected < 0 {
+			fmt.Println("Rewind cancelled")
+			return
+		}
+		mode, err := selectRewindOption("Restore before: "+checkpoints[selected].Prompt, []string{"Conversation and files", "Conversation only", "Files only"}, 0)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		if mode < 0 {
+			fmt.Println("Rewind cancelled")
+			return
+		}
+		modes := []string{"both", "conversation", "files"}
+		applyRewind(ag, checkpoints[selected].ID, modes[mode])
+		return
+	}
+	if len(parts) > 3 {
+		fmt.Println("Usage: /rewind ID [both|conversation|files]")
+		return
+	}
+	var id int
+	if _, err := fmt.Sscan(parts[1], &id); err != nil || fmt.Sprint(id) != parts[1] {
+		fmt.Println("Invalid checkpoint ID")
+		return
+	}
+	mode := "both"
+	if len(parts) == 3 {
+		mode = parts[2]
+	}
+	if mode != "both" && mode != "conversation" && mode != "files" {
+		fmt.Println("Mode must be both, conversation, or files")
+		return
+	}
+	found := false
+	for _, cp := range ag.Checkpoints() {
+		if cp.ID == id {
+			found = true
+		}
+	}
+	if !found {
+		fmt.Println("Checkpoint not found")
+		return
+	}
+	answer, err := state.Prompt("Restore " + mode + " before this turn? [y/N] ")
+	if err != nil || strings.ToLower(strings.TrimSpace(answer)) != "y" {
+		fmt.Println("Rewind cancelled")
+		return
+	}
+	applyRewind(ag, id, mode)
+}
+
+func applyRewind(ag *agent.Agent, id int, mode string) {
+	prompt, err := ag.Rewind(id, mode)
+	if err != nil {
+		fmt.Printf("Rewind failed: %v\n", err)
+		return
+	}
+	fmt.Println("Rewind complete.")
+	if mode != "files" {
+		fmt.Printf("Original prompt: %s\n", prompt)
 	}
 }

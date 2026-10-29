@@ -215,7 +215,13 @@ brew upgrade go
 
 ```
 diegoc-agent/
-├── cmd/diegoc-agent/    # 主程序入口
+├── cmd/diegoc-agent/     # CLI
+│   ├── main.go          # 参数、子命令与启动流程
+│   ├── bootstrap.go     # 客户端、工具、记忆与 Agent 组装
+│   ├── interactive.go   # 交互循环、定时任务与执行事件
+│   ├── commands.go      # 本地命令分发与执行输入转换
+│   ├── terminal_input.go # 终端取消与输入辅助
+│   └── *_ui.go          # 终端展示及各功能的命令处理
 ├── config/              # 配置文件
 │   ├── config-example.yaml
 │   ├── mcp-example.json

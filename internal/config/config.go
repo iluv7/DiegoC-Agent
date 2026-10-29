@@ -35,11 +35,17 @@ type AgentConfig struct {
 	TokenLimit       int    `yaml:"token_limit"` // trigger summarization when exceeded (default 80000)
 }
 
+// GoalConfig selects the isolated stop-check model on the same API provider.
+type GoalConfig struct {
+	Model     string `yaml:"model"`
+	MaxChecks int    `yaml:"max_checks"`
+}
+
 // MCPConfig holds MCP timeout settings.
 type MCPConfig struct {
-	ConnectTimeout   float64 `yaml:"connect_timeout"`
-	ExecuteTimeout  float64 `yaml:"execute_timeout"`
-	SSEReadTimeout  float64 `yaml:"sse_read_timeout"`
+	ConnectTimeout float64 `yaml:"connect_timeout"`
+	ExecuteTimeout float64 `yaml:"execute_timeout"`
+	SSEReadTimeout float64 `yaml:"sse_read_timeout"`
 }
 
 // MemoryConfig holds memory pipeline settings.
@@ -75,6 +81,7 @@ type Config struct {
 	Agent  AgentConfig  `yaml:"-"`
 	Tools  ToolsConfig  `yaml:"-"`
 	Memory MemoryConfig `yaml:"-"`
+	Goal   GoalConfig   `yaml:"-"`
 }
 
 // rawConfig is used to parse YAML with flat and nested keys.
@@ -90,10 +97,11 @@ type rawConfig struct {
 		MaxDelay        float64 `yaml:"max_delay"`
 		ExponentialBase float64 `yaml:"exponential_base"`
 	} `yaml:"retry"`
-	MaxSteps         int    `yaml:"max_steps"`
-	WorkspaceDir     string `yaml:"workspace_dir"`
-	SystemPromptPath string `yaml:"system_prompt_path"`
-	TokenLimit       int    `yaml:"token_limit"`
+	MaxSteps         int        `yaml:"max_steps"`
+	WorkspaceDir     string     `yaml:"workspace_dir"`
+	SystemPromptPath string     `yaml:"system_prompt_path"`
+	TokenLimit       int        `yaml:"token_limit"`
+	Goal             GoalConfig `yaml:"goal"`
 	Memory           struct {
 		Enabled         bool    `yaml:"enabled"`
 		WorkingDir      string  `yaml:"working_dir"`
@@ -106,7 +114,7 @@ type rawConfig struct {
 		ChromaEndpoint  string  `yaml:"chroma_endpoint"`
 		EmbeddingModel  string  `yaml:"embedding_model"`
 	} `yaml:"memory"`
-	Tools            struct {
+	Tools struct {
 		EnableFileTools bool   `yaml:"enable_file_tools"`
 		EnableBash      bool   `yaml:"enable_bash"`
 		EnableNote      bool   `yaml:"enable_note"`
@@ -115,9 +123,9 @@ type rawConfig struct {
 		EnableMCP       bool   `yaml:"enable_mcp"`
 		MCPConfigPath   string `yaml:"mcp_config_path"`
 		MCP             struct {
-			ConnectTimeout  float64 `yaml:"connect_timeout"`
-			ExecuteTimeout  float64 `yaml:"execute_timeout"`
-			SSEReadTimeout  float64 `yaml:"sse_read_timeout"`
+			ConnectTimeout float64 `yaml:"connect_timeout"`
+			ExecuteTimeout float64 `yaml:"execute_timeout"`
+			SSEReadTimeout float64 `yaml:"sse_read_timeout"`
 		} `yaml:"mcp"`
 	} `yaml:"tools"`
 }
@@ -215,6 +223,15 @@ func FromYAML(path string) (*Config, error) {
 	if raw.TokenLimit <= 0 {
 		raw.TokenLimit = 80000
 	}
+	if raw.Goal.Model == "" {
+		raw.Goal.Model = raw.Model
+	}
+	if raw.Goal.MaxChecks == 0 {
+		raw.Goal.MaxChecks = 10
+	}
+	if raw.Goal.MaxChecks < 1 || raw.Goal.MaxChecks > 100 {
+		return nil, fmt.Errorf("goal.max_checks must be between 1 and 100")
+	}
 	// Memory defaults
 	if raw.Memory.WorkingDir == "" {
 		raw.Memory.WorkingDir = ".reme"
@@ -272,6 +289,7 @@ func FromYAML(path string) (*Config, error) {
 	}
 
 	cfg := &Config{
+		Goal: raw.Goal,
 		LLM: LLMConfig{
 			APIKey:   raw.APIKey,
 			APIBase:  raw.APIBase,
@@ -300,9 +318,9 @@ func FromYAML(path string) (*Config, error) {
 			EnableMCP:       raw.Tools.EnableMCP,
 			MCPConfigPath:   raw.Tools.MCPConfigPath,
 			MCP: MCPConfig{
-				ConnectTimeout:  raw.Tools.MCP.ConnectTimeout,
-				ExecuteTimeout:  raw.Tools.MCP.ExecuteTimeout,
-				SSEReadTimeout:  raw.Tools.MCP.SSEReadTimeout,
+				ConnectTimeout: raw.Tools.MCP.ConnectTimeout,
+				ExecuteTimeout: raw.Tools.MCP.ExecuteTimeout,
+				SSEReadTimeout: raw.Tools.MCP.SSEReadTimeout,
 			},
 		},
 		Memory: MemoryConfig{

@@ -26,7 +26,7 @@ func (a *Agent) ContextUsage() ContextUsage {
 		usage.Limit, usage.AutoCompactThreshold, _ = a.memoryManager.ContextSettings()
 	}
 	counter := memory.NewRuleTokenCounter()
-	for _, msg := range a.Messages {
+	for _, msg := range a.goalRequestMessages() {
 		tokens := counter.CountMessages([]schema.Message{msg})
 		switch {
 		case memory.IsSummaryMessage(msg):

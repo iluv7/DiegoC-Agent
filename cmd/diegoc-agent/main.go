@@ -157,6 +157,12 @@ func main() {
 	}
 
 	ag := agent.New(client, systemPrompt, cfg.Agent.MaxSteps, cfg.Agent.TokenLimit, toolList)
+	goalClient, err := llm.NewClient(cfg.LLM.APIKey, cfg.LLM.APIBase, cfg.Goal.Model, provider, retry)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Goal evaluator client error: %v\n", err)
+		os.Exit(1)
+	}
+	ag.ConfigureGoals(goalClient, cfg.Goal.Model, cfg.Goal.MaxChecks)
 	agentLogger := logger.New()
 	ag.Logger = agentLogger
 
@@ -338,7 +344,7 @@ func runLogSubcommand(filename string) {
 	fmt.Printf("%s%s%s\n", cDim, strings.Repeat("─", 80), cReset)
 }
 
-var slashCommands = []string{"/fork", "/sessions", "/switch", "/session", "/tasks", "/send", "/cancel", "/approve", "/help", "/rewind", "/diff", "/loop", "/clear", "/history", "/stats", "/context", "/compact", "/plan", "/execute", "/log", "/exit", "/quit", "/q"}
+var slashCommands = []string{"/fork", "/sessions", "/switch", "/session", "/tasks", "/send", "/cancel", "/approve", "/help", "/rewind", "/diff", "/loop", "/goal", "/clear", "/history", "/stats", "/context", "/compact", "/plan", "/execute", "/log", "/exit", "/quit", "/q"}
 
 func runInteractive(ag *agent.Agent, workspaceDir string, agentLogger *logger.AgentLogger) {
 	runInteractiveWithLoops(ag, workspaceDir, agentLogger, loop.New(nil))
@@ -428,6 +434,12 @@ func runInteractiveWithLoops(ag *agent.Agent, workspaceDir string, agentLogger *
 			inputHistory = append(inputHistory, line)
 			histories[current.ID] = inputHistory
 			state.AppendHistory(line)
+			if prompt, handled := handleGoalCommand(ag, line); handled {
+				if prompt == "" {
+					continue
+				}
+				line = prompt
+			}
 			if handleLoopCommand(loops, current.ID, workspaceDir, line) {
 				continue
 			}
@@ -481,15 +493,15 @@ func runInteractiveWithLoops(ag *agent.Agent, workspaceDir string, agentLogger *
 					continue
 				}
 				if cmd == "/clear" {
+					oldCount := len(ag.Messages)
+					ag.ClearConversation()
 					if count := loops.Cancel(current.ID, "all"); count > 0 {
 						fmt.Printf("Cancelled %d loop(s) in [%s].\n", count, current.ID)
 					}
-					oldCount := len(ag.Messages)
 					if oldCount > 1 {
-						ag.ClearConversation()
-						fmt.Printf("%s✅ Cleared %d messages, new session.%s\n\n", cGreen, oldCount-1, cReset)
+						fmt.Printf("%s✅ Cleared %d messages and goal, new session.%s\n\n", cGreen, oldCount-1, cReset)
 					} else {
-						fmt.Printf("%sHistory already empty.%s\n\n", cDim, cReset)
+						fmt.Printf("%sHistory already empty; goal cleared.%s\n\n", cDim, cReset)
 					}
 					continue
 				}
@@ -526,6 +538,8 @@ func runInteractiveWithLoops(ag *agent.Agent, workspaceDir string, agentLogger *
 		fmt.Println("\nAgent › Thinking... (Esc to cancel)")
 		ctx, cancel := context.WithCancel(context.Background())
 		ctx = tools.WithLoopSession(ctx, loops, current.ID)
+		goalEvents := make(chan agent.GoalEvent, 16)
+		ctx = agent.WithGoalEvents(ctx, goalEvents)
 		questionRequests := make(chan userQuestionRequest)
 		ctx = tools.WithUserQuestionHandler(ctx, func(ctx context.Context, question tools.UserQuestion) (tools.UserAnswer, error) {
 			return requestUserAnswer(ctx, questionRequests, question)
@@ -564,6 +578,8 @@ func runInteractiveWithLoops(ag *agent.Agent, workspaceDir string, agentLogger *
 	agentLoop:
 		for {
 			select {
+			case event := <-goalEvents:
+				printGoalEvent(event)
 			case req := <-questionRequests:
 				stopEsc()
 				if err := ctx.Err(); err != nil {
@@ -635,6 +651,9 @@ func runInteractiveWithLoops(ag *agent.Agent, workspaceDir string, agentLogger *
 
 		cancel()
 		stopEsc()
+		for len(goalEvents) > 0 {
+			printGoalEvent(<-goalEvents)
+		}
 		if scheduled != nil {
 			loops.Complete(current.ID, scheduled.ID)
 			if runErr != nil {
@@ -643,9 +662,12 @@ func runInteractiveWithLoops(ag *agent.Agent, workspaceDir string, agentLogger *
 			}
 		}
 
+		var goalPaused *agent.GoalPausedError
 		if runErr != nil {
-			if runErr == context.Canceled {
+			if errors.Is(runErr, context.Canceled) {
 				fmt.Printf("\n%s⚠️  Cancelled by user (Esc).%s\n", cBrightYellow, cReset)
+			} else if errors.As(runErr, &goalPaused) {
+				fmt.Printf("\n%s%v%s\n", cBrightYellow, runErr, cReset)
 			} else {
 				var retryErr *llm.RetryExhaustedError
 				if errors.As(runErr, &retryErr) {
@@ -654,7 +676,8 @@ func runInteractiveWithLoops(ag *agent.Agent, workspaceDir string, agentLogger *
 					fmt.Fprintf(os.Stderr, "%s❌ Error: %v%s\n", cRed, runErr, cReset)
 				}
 			}
-		} else if out != "" {
+		}
+		if out != "" && (runErr == nil || goalPaused != nil) {
 			fmt.Printf("\n%s🤖 Agent%s %s›%s\n%s\n", cBold, cReset, cDim, cReset, formatMarkdownForTerminal(out))
 		}
 		if agentLogger != nil {
@@ -707,6 +730,9 @@ func formatMarkdownForTerminal(s string) string {
 }
 
 func printHelp() {
+	fmt.Println("  /goal <condition> - Work until an independent stop check verifies completion")
+	fmt.Println("  /goal [status] - Show this session's goal, checks and reported token usage")
+	fmt.Println("  /goal cancel|resume - Discard or resume a paused goal; Esc pauses execution")
 	fmt.Println("  /loop [interval] [prompt] - Repeat a prompt (default 10m; s/m/h/d, minimum 1m)")
 	fmt.Println("  /loop list - List this session's loops and next run times")
 	fmt.Println("  /loop cancel loop-ID|all - Stop loops in this session")

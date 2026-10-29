@@ -234,6 +234,7 @@ func (a *Agent) Rewind(id int, mode string) (string, error) {
 		}
 	}
 	if mode != "files" {
+		a.PauseGoal("conversation rewound; review the target before resuming")
 		a.Messages = cloneMessages(cp.Messages)
 		a.compressedSummary = cp.Summary
 		if a.memoryManager != nil {
@@ -249,6 +250,8 @@ func (a *Agent) Rewind(id int, mode string) (string, error) {
 
 // ClearConversation also discards rewind points and compacted context.
 func (a *Agent) ClearConversation() {
+	a.CancelGoal()
+	a.lastGoal = nil
 	a.Messages = []schema.Message{{Role: "system", Content: a.SystemPrompt}}
 	a.checkpoints = nil
 	a.compressedSummary = ""

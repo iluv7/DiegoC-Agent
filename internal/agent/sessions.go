@@ -68,6 +68,7 @@ func (a *Agent) cloneConversation() *Agent {
 	}
 	child.skipNextTokenCheck = true
 	child.needsToolRepair = a.needsToolRepair
+	child.goalConfig = a.goalConfig // evaluator settings are shared; goals are not
 	child.forks = a.forks
 	// A foreground clone can itself fork. It does not inherit worker-only limits,
 	// a parent's pending reports, token billing counters, logger or mutable memory pipeline.

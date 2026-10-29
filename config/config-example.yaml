@@ -28,6 +28,13 @@ workspace_dir: "./workspace"
 system_prompt_path: "system_prompt.md"
 token_limit: 80000  # trigger context summarization when exceeded
 
+# ===== Goal Stop Check =====
+# Same API key/base/provider as the main model. Select a smaller compatible
+# model here if available; empty means the main model in a separate request.
+goal:
+  model: ""
+  max_checks: 10  # maximum stop checks per run; /goal resume starts a new run
+
 # ===== Tools Configuration =====
 tools:
   enable_file_tools: true

@@ -36,6 +36,9 @@ type Agent struct {
 	APITotalTokens     int
 	skipNextTokenCheck bool
 	Logger             *logger.AgentLogger
+	goal               *GoalInfo
+	lastGoal           *GoalInfo
+	goalConfig         goalConfig
 
 	// Memory pipeline (Phase 11-12). When set, replaces the legacy summarizeIfNeeded.
 	memoryManager     *memory.Manager
@@ -158,6 +161,10 @@ func (a *Agent) runLoop(
 		a.forkBatch = nil
 		if runErr != nil {
 			a.needsToolRepair = true
+			if a.goalActive() {
+				a.PauseGoal(runErr.Error())
+				a.emitGoalEvent(ctx, "paused", runErr.Error())
+			}
 		}
 	}()
 	if a.Logger != nil {
@@ -167,6 +174,7 @@ func (a *Agent) runLoop(
 	for _, t := range a.Tools {
 		toolNames = append(toolNames, t.Name())
 	}
+	goalChecks := 0
 	for step := 0; step < a.MaxSteps; step++ {
 		select {
 		case <-ctx.Done():
@@ -177,7 +185,11 @@ func (a *Agent) runLoop(
 		a.deliverForkReports()
 		if a.memoryManager != nil {
 			// Phase 11-12: full memory pipeline
-			keptMsgs, summary, err := a.memoryManager.PreReasoningHook(ctx, a.Messages, a.SystemPrompt)
+			systemPrompt := a.SystemPrompt
+			if a.goalActive() && len(a.Messages) > 0 {
+				systemPrompt = contentString(a.goalRequestMessages()[0])
+			}
+			keptMsgs, summary, err := a.memoryManager.PreReasoningHook(ctx, a.Messages, systemPrompt)
 			if err != nil {
 				return "", err
 			}
@@ -192,16 +204,20 @@ func (a *Agent) runLoop(
 			}
 		}
 
+		requestMessages := a.goalRequestMessages()
 		if a.Logger != nil {
-			a.Logger.LogRequest(a.Messages, toolNames)
+			a.Logger.LogRequest(requestMessages, toolNames)
 		}
-		resp, err := a.LLM.Generate(ctx, a.Messages, a.Tools)
+		resp, err := a.LLM.Generate(ctx, requestMessages, a.Tools)
 		if err != nil {
 			return "", err
 		}
 
 		if resp.Usage != nil {
 			a.APITotalTokens += resp.Usage.TotalTokens
+			if a.goalActive() {
+				a.goal.Tokens += resp.Usage.TotalTokens
+			}
 		}
 		if a.Logger != nil {
 			a.Logger.LogResponse(resp.Content, resp.Thinking, resp.ToolCalls, resp.FinishReason)
@@ -214,6 +230,14 @@ func (a *Agent) runLoop(
 		})
 
 		if len(resp.ToolCalls) == 0 {
+			if a.goalActive() {
+				goalChecks++
+				satisfied, err := a.checkGoal(ctx, goalChecks)
+				if err != nil || satisfied {
+					return resp.Content, err
+				}
+				continue
+			}
 			return resp.Content, nil
 		}
 
@@ -339,6 +363,9 @@ func (a *Agent) runLoop(
 			}
 		}
 		a.forkBatch = nil
+	}
+	if a.goalActive() {
+		return "", &GoalPausedError{Reason: fmt.Sprintf("reached the Agent step limit (%d) before the goal was verified", a.MaxSteps)}
 	}
 	if a.isFork {
 		return "", fmt.Errorf("fork reached maximum steps (%d) without a final response", a.MaxSteps)

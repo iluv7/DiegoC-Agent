@@ -101,11 +101,7 @@ func (m *ForkManager) Fork(parent *Agent, task string) (string, error) {
 	// Stateful permission rules, tool bindings, messages and summaries are not shared.
 	list := append([]tools.Tool(nil), parent.Tools...)
 	child := NewWithPermission(parent.LLM, parent.SystemPrompt, parent.MaxSteps, parent.TokenLimit, list, copyPermission(parent.PermissionCtx))
-	child.Messages = buildForkMessages(history, task)
-	child.compressedSummary = parent.compressedSummary
-	child.contextLimit = parent.contextLimit
-	child.compactLanguage = parent.compactLanguage
-	child.skipNextTokenCheck = true // Preserve the inherited API prefix on the first request.
+	child.inheritContext(parent, buildForkMessages(history, task))
 	child.isFork = true
 	child.forks = m
 	for i, t := range child.Tools {

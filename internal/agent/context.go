@@ -18,13 +18,8 @@ type ContextUsage struct {
 // ContextUsage is a read-only estimate of the next request's current contents.
 // It never calls the model, compacts history, or uses cumulative billing tokens.
 func (a *Agent) ContextUsage() ContextUsage {
-	usage := ContextUsage{Limit: a.contextLimit, AutoCompactThreshold: a.TokenLimit}
-	if usage.Limit <= 0 {
-		usage.Limit = a.TokenLimit
-	}
-	if a.memoryManager != nil {
-		usage.Limit, usage.AutoCompactThreshold, _ = a.memoryManager.ContextSettings()
-	}
+	limit, threshold, _ := a.contextState.settings(a.TokenLimit)
+	usage := ContextUsage{Limit: limit, AutoCompactThreshold: threshold}
 	counter := memory.NewRuleTokenCounter()
 	for _, msg := range a.goalRequestMessages() {
 		tokens := counter.CountMessages([]schema.Message{msg})
@@ -60,10 +55,7 @@ func (a *Agent) Compact(ctx context.Context, instructions string) (stats Compact
 		return stats, err
 	}
 	var system, conversation []schema.Message
-	previous := a.compressedSummary
-	if a.memoryManager != nil {
-		previous = a.memoryManager.CompressedSummary()
-	}
+	previous := a.contextState.summaryText()
 	for _, msg := range cloneMessages(a.Messages) {
 		switch {
 		case memory.IsSummaryMessage(msg):
@@ -80,7 +72,8 @@ func (a *Agent) Compact(ctx context.Context, instructions string) (stats Compact
 	if len(conversation) == 0 {
 		return stats, fmt.Errorf("no new conversation to compact")
 	}
-	result, err := memory.CompactConversation(ctx, a.LLM, conversation, previous, instructions, stats.Before.Limit, a.compactLanguage)
+	_, _, language := a.contextState.settings(a.TokenLimit)
+	result, err := memory.CompactConversation(ctx, a.LLM, conversation, previous, instructions, stats.Before.Limit, language)
 	a.APITotalTokens += result.TotalTokens
 	if err != nil {
 		return stats, err
@@ -94,13 +87,9 @@ func (a *Agent) Compact(ctx context.Context, instructions string) (stats Compact
 	if memory.EstimateTokens(compacted) >= memory.EstimateTokens(a.Messages) {
 		return stats, fmt.Errorf("summary would not reduce context; conversation was kept")
 	}
-	a.Messages = compacted
-	a.compressedSummary = result.Summary
-	if a.memoryManager != nil {
-		a.memoryManager.SetCompressedSummary(result.Summary)
-	}
+	a.setContext(compacted, result.Summary)
 	a.needsToolRepair = false
-	a.skipNextTokenCheck = true
+	a.contextState.skipNextTokenCheck = true
 	stats.After = a.ContextUsage()
 	return stats, nil
 }

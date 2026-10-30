@@ -157,7 +157,6 @@ func TestForkSnapshotFollowupAndPermissionIsolation(t *testing.T) {
 	defer mgr.Close()
 	mgr.SetCompressedSummary("inherited summary")
 	parent.SetMemoryManager(mgr)
-	parent.compressedSummary = "inherited summary"
 	parent.PermissionCtx.AddRule(permission.Rule{ToolName: "write_file", Behavior: permission.BehaviorALLOW, RuleContent: "first"})
 	m := NewForkManager(context.Background())
 	defer m.Close()
@@ -177,7 +176,7 @@ func TestForkSnapshotFollowupAndPermissionIsolation(t *testing.T) {
 	if parent.PermissionCtx.AllowRules["write_file"][0].RuleContent != "first" || len(parent.PermissionCtx.AllowRules["bash"]) != 0 {
 		t.Fatal("permission rules are shared")
 	}
-	if child.memoryManager != nil || child.Logger != nil || child.compressedSummary != "inherited summary" {
+	if child.contextState.manager != nil || child.Logger != nil || child.contextState.summaryText() != "inherited summary" {
 		t.Fatal("stateful memory manager/logger was shared")
 	}
 	parent.AddUserMessage("parent's later message")

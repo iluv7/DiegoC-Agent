@@ -2,7 +2,6 @@ package agent
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,13 +18,12 @@ type fileVersion struct {
 	Exists bool
 }
 type checkpoint struct {
-	ID       int
-	Prompt   string
-	Messages []schema.Message
-	Summary  string
-	Mode     permission.Mode
-	Before   map[string]fileVersion
-	After    map[string]fileVersion
+	ID      int
+	Prompt  string
+	Context contextSnapshot
+	Mode    permission.Mode
+	Before  map[string]fileVersion
+	After   map[string]fileVersion
 }
 
 // CheckpointInfo describes a user turn without exposing its saved state.
@@ -35,25 +33,9 @@ type CheckpointInfo struct {
 	Files  int
 }
 
-func cloneMessages(messages []schema.Message) []schema.Message {
-	data, err := json.Marshal(messages)
-	if err != nil {
-		panic(err)
-	}
-	var cloned []schema.Message
-	if err := json.Unmarshal(data, &cloned); err != nil {
-		panic(err)
-	}
-	return cloned
-}
-
 func (a *Agent) makeCheckpoint(prompt string) {
 	a.checkpointSequence++
-	summary := a.compressedSummary
-	if a.memoryManager != nil {
-		summary = a.memoryManager.CompressedSummary()
-	}
-	a.checkpoints = append(a.checkpoints, checkpoint{ID: a.checkpointSequence, Prompt: prompt, Messages: cloneMessages(a.Messages), Summary: summary, Mode: a.PermissionCtx.Mode, Before: map[string]fileVersion{}, After: map[string]fileVersion{}})
+	a.checkpoints = append(a.checkpoints, checkpoint{ID: a.checkpointSequence, Prompt: prompt, Context: a.snapshotContext(), Mode: a.PermissionCtx.Mode, Before: map[string]fileVersion{}, After: map[string]fileVersion{}})
 	if len(a.checkpoints) > 100 {
 		a.checkpoints = a.checkpoints[len(a.checkpoints)-100:]
 	}
@@ -235,13 +217,8 @@ func (a *Agent) Rewind(id int, mode string) (string, error) {
 	}
 	if mode != "files" {
 		a.PauseGoal("conversation rewound; review the target before resuming")
-		a.Messages = cloneMessages(cp.Messages)
-		a.compressedSummary = cp.Summary
-		if a.memoryManager != nil {
-			a.memoryManager.SetCompressedSummary(cp.Summary)
-		}
+		a.restoreContext(cp.Context)
 		a.PermissionCtx.Mode = cp.Mode
-		a.skipNextTokenCheck = false
 		a.toolCallStates = make(map[string]permission.ToolCallState)
 		a.checkpoints = a.checkpoints[:idx]
 	}
@@ -252,11 +229,6 @@ func (a *Agent) Rewind(id int, mode string) (string, error) {
 func (a *Agent) ClearConversation() {
 	a.CancelGoal()
 	a.lastGoal = nil
-	a.Messages = []schema.Message{{Role: "system", Content: a.SystemPrompt}}
+	a.restoreContext(contextSnapshot{messages: []schema.Message{{Role: "system", Content: a.SystemPrompt}}})
 	a.checkpoints = nil
-	a.compressedSummary = ""
-	a.skipNextTokenCheck = false
-	if a.memoryManager != nil {
-		a.memoryManager.SetCompressedSummary("")
-	}
 }

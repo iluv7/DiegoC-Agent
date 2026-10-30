@@ -216,10 +216,7 @@ func (a *Agent) goalEvaluationMessages() []schema.Message {
 	for i, j := 0, len(entries)-1; i < j; i, j = i+1, j-1 {
 		entries[i], entries[j] = entries[j], entries[i]
 	}
-	summary := a.compressedSummary
-	if a.memoryManager != nil {
-		summary = a.memoryManager.CompressedSummary()
-	}
+	summary := a.contextState.summaryText()
 	data, _ := json.Marshal(map[string]interface{}{
 		"goal": a.goal.Condition, "summary": goalTextPreview(summary, 6000),
 		"transcript": entries, "evidence_truncated": truncated || len(summary) > 6000,

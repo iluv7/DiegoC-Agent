@@ -34,17 +34,12 @@ type Agent struct {
 	Tools              []tools.Tool
 	toolByName         map[string]tools.Tool
 	APITotalTokens     int
-	skipNextTokenCheck bool
 	Logger             *logger.AgentLogger
 	goal               *GoalInfo
 	lastGoal           *GoalInfo
 	goalConfig         goalConfig
 
-	// Memory pipeline (Phase 11-12). When set, replaces the legacy summarizeIfNeeded.
-	memoryManager     *memory.Manager
-	compressedSummary string
-	contextLimit      int
-	compactLanguage   string
+	contextState conversationContext
 
 	// HITL 权限系统
 	PermissionCtx    permission.Context
@@ -102,17 +97,16 @@ func NewWithPermission(client llm.Client, systemPrompt string, maxSteps int, tok
 		{Role: "system", Content: systemPrompt},
 	}
 	ag := &Agent{
-		LLM:             client,
-		SystemPrompt:    systemPrompt,
-		Messages:        msgs,
-		MaxSteps:        maxSteps,
-		TokenLimit:      tokenLimit,
-		contextLimit:    tokenLimit,
-		compactLanguage: "zh",
-		Tools:           toolList,
-		toolByName:      byName,
-		PermissionCtx:   permCtx,
-		toolCallStates:  make(map[string]permission.ToolCallState),
+		LLM:            client,
+		SystemPrompt:   systemPrompt,
+		Messages:       msgs,
+		MaxSteps:       maxSteps,
+		TokenLimit:     tokenLimit,
+		contextState:   conversationContext{limit: tokenLimit, language: "zh"},
+		Tools:          toolList,
+		toolByName:     byName,
+		PermissionCtx:  permCtx,
+		toolCallStates: make(map[string]permission.ToolCallState),
 	}
 	ag.permissionEngine = permission.NewEngine(&ag.PermissionCtx)
 	return ag
@@ -132,10 +126,7 @@ func (a *Agent) AddUserMessage(content string) {
 // SetMemoryManager configures the memory pipeline.
 // When set, PreReasoningHook replaces the legacy summarizeIfNeeded in the agent loop.
 func (a *Agent) SetMemoryManager(mgr *memory.Manager) {
-	a.memoryManager = mgr
-	if mgr != nil {
-		a.contextLimit, _, a.compactLanguage = mgr.ContextSettings()
-	}
+	a.contextState.setManager(mgr)
 }
 
 // RunWithHITL executes the loop with HITL support.
@@ -183,25 +174,8 @@ func (a *Agent) runLoop(
 		}
 
 		a.deliverForkReports()
-		if a.memoryManager != nil {
-			// Phase 11-12: full memory pipeline
-			systemPrompt := a.SystemPrompt
-			if a.goalActive() && len(a.Messages) > 0 {
-				systemPrompt = contentString(a.goalRequestMessages()[0])
-			}
-			keptMsgs, summary, err := a.memoryManager.PreReasoningHook(ctx, a.Messages, systemPrompt)
-			if err != nil {
-				return "", err
-			}
-			a.Messages = keptMsgs
-			if summary != "" {
-				a.compressedSummary = summary
-			}
-		} else {
-			// Legacy fallback: simple per-round summarization
-			if err := a.summarizeIfNeeded(ctx); err != nil {
-				return "", err
-			}
+		if err := a.prepareContext(ctx); err != nil {
+			return "", err
 		}
 
 		requestMessages := a.goalRequestMessages()

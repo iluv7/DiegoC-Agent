@@ -10,8 +10,8 @@ import (
 
 // summarizeIfNeeded checks token count and, if over limit, replaces execution segments with LLM-generated summaries.
 func (a *Agent) summarizeIfNeeded(ctx context.Context) error {
-	if a.skipNextTokenCheck {
-		a.skipNextTokenCheck = false
+	if a.contextState.skipNextTokenCheck {
+		a.contextState.skipNextTokenCheck = false
 		return nil
 	}
 	estimated := a.ContextUsage().Total
@@ -56,7 +56,7 @@ func (a *Agent) summarizeIfNeeded(ctx context.Context) error {
 	}
 
 	a.Messages = newMessages
-	a.skipNextTokenCheck = true
+	a.contextState.skipNextTokenCheck = true
 	return nil
 }
 

@@ -59,14 +59,7 @@ func (s *ConversationSessions) Switch(id string) error {
 
 func (a *Agent) cloneConversation() *Agent {
 	child := NewWithPermission(a.LLM, a.SystemPrompt, a.MaxSteps, a.TokenLimit, append([]tools.Tool(nil), a.Tools...), copyPermission(a.PermissionCtx))
-	child.Messages = cloneMessages(a.Messages)
-	child.compressedSummary = a.compressedSummary
-	child.contextLimit = a.contextLimit
-	child.compactLanguage = a.compactLanguage
-	if a.memoryManager != nil {
-		child.compressedSummary = a.memoryManager.CompressedSummary()
-	}
-	child.skipNextTokenCheck = true
+	child.inheritContext(a, cloneMessages(a.Messages))
 	child.needsToolRepair = a.needsToolRepair
 	child.goalConfig = a.goalConfig // evaluator settings are shared; goals are not
 	child.forks = a.forks

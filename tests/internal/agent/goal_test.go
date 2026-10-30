@@ -186,7 +186,7 @@ func TestGoalSessionLifecycleAndCompactionEvidence(t *testing.T) {
 		t.Fatal("active goal instruction was excluded from context accounting")
 	}
 	a.AddUserMessage("start")
-	a.compressedSummary = "important earlier evidence"
+	a.contextState.setSummary("important earlier evidence")
 	a.Messages = append(a.Messages, schema.Message{Role: "tool", Content: strings.Repeat("中文 evidence ", 15000)})
 	request := a.goalEvaluationMessages()
 	payload := contentString(request[1])

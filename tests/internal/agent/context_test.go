@@ -89,39 +89,49 @@ func TestCompactPreservesPlanPermissionsRewindAndSessionIsolation(t *testing.T) 
 }
 
 func TestCompactFailureOrCancellationKeepsOriginalState(t *testing.T) {
-	for _, mode := range []string{"api error", "invalid", "cancel", "larger"} {
-		t.Run(mode, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			client := forkClientFunc(func(context.Context, []schema.Message, []tools.Tool) (*schema.LLMResponse, error) {
-				if mode == "api error" {
-					return nil, errors.New("offline")
+	for _, backend := range []string{"standalone", "memory"} {
+		for _, mode := range []string{"api error", "invalid", "cancel", "larger"} {
+			t.Run(backend+"/"+mode, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				client := forkClientFunc(func(context.Context, []schema.Message, []tools.Tool) (*schema.LLMResponse, error) {
+					if mode == "api error" {
+						return nil, errors.New("offline")
+					}
+					if mode == "cancel" {
+						cancel()
+					}
+					summary := compactTestSummary
+					if mode == "invalid" {
+						summary = "not structured"
+					}
+					if mode == "larger" {
+						summary += strings.Repeat("unnecessary expanded detail ", 1000)
+					}
+					return &schema.LLMResponse{Content: summary, Usage: &schema.TokenUsage{TotalTokens: 40}}, nil
+				})
+				a := New(client, "system", 5, 20000, nil)
+				if backend == "memory" {
+					cfg := memory.DefaultConfig()
+					cfg.WorkingDir, cfg.MaxInputLength = t.TempDir(), 20000
+					mgr := memory.NewManager(cfg, client)
+					defer mgr.Close()
+					a.SetMemoryManager(mgr)
 				}
-				if mode == "cancel" {
-					cancel()
+				longConversation(a)
+				a.contextState.setSummary("previous summary")
+				a.needsToolRepair = true
+				before := cloneMessages(a.Messages)
+				checkpoints := a.Checkpoints()
+				_, err := a.Compact(ctx, "")
+				if err == nil || !reflect.DeepEqual(before, cloneMessages(a.Messages)) || a.contextState.summaryText() != "previous summary" || !a.needsToolRepair || !reflect.DeepEqual(checkpoints, a.Checkpoints()) {
+					t.Fatalf("failed compaction changed state: %v", err)
 				}
-				summary := compactTestSummary
-				if mode == "invalid" {
-					summary = "not structured"
+				if mode != "api error" && a.APITotalTokens != 40 {
+					t.Fatal("spent compaction tokens not recorded")
 				}
-				if mode == "larger" {
-					summary += strings.Repeat("unnecessary expanded detail ", 1000)
-				}
-				return &schema.LLMResponse{Content: summary, Usage: &schema.TokenUsage{TotalTokens: 40}}, nil
 			})
-			a := New(client, "system", 5, 20000, nil)
-			longConversation(a)
-			a.compressedSummary, a.needsToolRepair = "previous summary", true
-			before := cloneMessages(a.Messages)
-			checkpoints := a.Checkpoints()
-			_, err := a.Compact(ctx, "")
-			if err == nil || !reflect.DeepEqual(before, cloneMessages(a.Messages)) || a.compressedSummary != "previous summary" || !a.needsToolRepair || !reflect.DeepEqual(checkpoints, a.Checkpoints()) {
-				t.Fatalf("failed compaction changed state: %v", err)
-			}
-			if mode != "api error" && a.APITotalTokens != 40 {
-				t.Fatal("spent compaction tokens not recorded")
-			}
-		})
+		}
 	}
 }
 
@@ -148,7 +158,7 @@ func TestCompactPartialFailureDoesNotApplyIntermediateSummary(t *testing.T) {
 	a := New(client, "system", 5, 1800, nil)
 	longConversation(a)
 	before := cloneMessages(a.Messages)
-	if _, err := a.Compact(context.Background(), ""); err == nil || calls != 2 || !reflect.DeepEqual(before, cloneMessages(a.Messages)) || a.compressedSummary != "" || a.APITotalTokens != 20 {
+	if _, err := a.Compact(context.Background(), ""); err == nil || calls != 2 || !reflect.DeepEqual(before, cloneMessages(a.Messages)) || a.contextState.summaryText() != "" || a.APITotalTokens != 20 {
 		t.Fatalf("partial summary was applied or billed tokens lost: calls=%d tokens=%d err=%v", calls, a.APITotalTokens, err)
 	}
 }

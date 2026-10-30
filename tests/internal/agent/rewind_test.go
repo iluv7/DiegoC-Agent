@@ -99,19 +99,19 @@ func TestConversationSnapshotSurvivesCompaction(t *testing.T) {
 	a := New(nil, "system", 10, 1000, nil)
 	a.AddUserMessage("first")
 	a.Messages = append(a.Messages, schema.Message{Role: "assistant", Content: "answer", ToolCalls: []schema.ToolCall{{ID: "call", Function: schema.FunctionCall{Arguments: map[string]interface{}{"value": "before"}}}}})
-	a.compressedSummary = "old summary"
+	a.contextState.setSummary("old summary")
 	a.AddUserMessage("second")
 	a.Messages[2].ToolCalls[0].Function.Arguments["value"] = "mutated"
 	a.Messages = []schema.Message{{Role: "system", Content: "compacted"}}
-	a.compressedSummary = "future summary"
+	a.contextState.setSummary("future summary")
 	if _, err := a.Rewind(2, "conversation"); err != nil {
 		t.Fatal(err)
 	}
-	if len(a.Messages) != 3 || a.compressedSummary != "old summary" || a.Messages[2].ToolCalls[0].Function.Arguments["value"] != "before" {
+	if len(a.Messages) != 3 || a.contextState.summaryText() != "old summary" || a.Messages[2].ToolCalls[0].Function.Arguments["value"] != "before" {
 		t.Fatal("snapshot was mutated or lost")
 	}
 	a.ClearConversation()
-	if len(a.Checkpoints()) != 0 || a.compressedSummary != "" {
+	if len(a.Checkpoints()) != 0 || a.contextState.summaryText() != "" {
 		t.Fatal("clear left rewind state")
 	}
 	if _, err := a.Rewind(1, "both"); err == nil {

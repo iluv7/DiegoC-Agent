@@ -39,7 +39,7 @@ func TestInteractiveForkIsAnExactSnapshotWithoutATaskOrAPICall(t *testing.T) {
 	if !reflect.DeepEqual(child.Agent.Messages, cloneMessages(root.Messages)) {
 		t.Fatal("fork added a task or changed the inherited context")
 	}
-	if child.Agent.isFork || child.Agent.memoryManager != nil || child.Agent.compressedSummary != "summary at fork" {
+	if child.Agent.isFork || child.Agent.contextState.manager != nil || child.Agent.contextState.summaryText() != "summary at fork" {
 		t.Fatal("foreground clone inherited worker limits or shared mutable memory")
 	}
 	child.Agent.Messages[2].ToolCalls[0].Function.Arguments["prompt"] = "child only"

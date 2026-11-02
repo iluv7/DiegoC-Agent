@@ -51,7 +51,7 @@ func TestInteractiveForkIsAnExactSnapshotWithoutATaskOrAPICall(t *testing.T) {
 	if tool.owner != child.Agent {
 		t.Fatal("Agent tool still bound to main")
 	}
-	if child.Agent.permissionEngine.Context != &child.Agent.PermissionCtx {
+	if child.Agent.executor.permissions.Context != &child.Agent.PermissionCtx {
 		t.Fatal("permissions not session-local")
 	}
 }

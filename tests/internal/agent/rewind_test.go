@@ -12,7 +12,7 @@ import (
 
 func writeTracked(t *testing.T, a *Agent, dir, path, content string) {
 	t.Helper()
-	a.executeAndAppend(context.Background(), schema.ToolCall{ID: "write", Function: schema.FunctionCall{Name: "write_file"}}, &tools.WriteTool{WorkspaceDir: dir}, map[string]interface{}{"path": path, "content": content})
+	a.executor.execute(context.Background(), schema.ToolCall{ID: "write", Function: schema.FunctionCall{Name: "write_file"}}, &tools.WriteTool{WorkspaceDir: dir}, map[string]interface{}{"path": path, "content": content})
 	last := a.Messages[len(a.Messages)-1]
 	if text, _ := last.Content.(string); len(text) >= 6 && text[:6] == "Error:" {
 		t.Fatal(text)

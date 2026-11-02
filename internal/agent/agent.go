@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sync"
 
@@ -46,11 +45,8 @@ type Agent struct {
 	contextLimit      int
 	compactLanguage   string
 
-	// HITL 权限系统
-	PermissionCtx    permission.Context
-	permissionEngine *permission.Engine
-	replyID          string                              // 当前回复的 ID，关联 HITL request 和 response
-	toolCallStates   map[string]permission.ToolCallState // tool_call_id → 状态
+	PermissionCtx permission.Context
+	executor      *toolExecutor
 }
 
 // SetPlanMode switches the same ReAct agent between read-only planning and execution.
@@ -112,9 +108,8 @@ func NewWithPermission(client llm.Client, systemPrompt string, maxSteps int, tok
 		Tools:           toolList,
 		toolByName:      byName,
 		PermissionCtx:   permCtx,
-		toolCallStates:  make(map[string]permission.ToolCallState),
 	}
-	ag.permissionEngine = permission.NewEngine(&ag.PermissionCtx)
+	ag.executor = newToolExecutor(ag)
 	return ag
 }
 
@@ -244,123 +239,8 @@ func (a *Agent) runLoop(
 		if a.forks != nil {
 			a.forkBatch = cloneMessages(a.Messages)
 		}
-		// 执行每个工具调用（带权限检查）
-		for _, tc := range resp.ToolCalls {
-			select {
-			case <-ctx.Done():
-				a.cleanupIncompleteMessages()
-				return "", ctx.Err()
-			default:
-			}
-
-			args := toolArgsFromRaw(tc.Function.Arguments)
-			if args == nil {
-				args = make(map[string]interface{})
-			}
-
-			tool := a.toolByName[tc.Function.Name]
-			if tool == nil {
-				a.appendToolError(tc, "Unknown tool: "+tc.Function.Name)
-				continue
-			}
-
-			// ============== 权限检查 (HITL 插入点) ==============
-			var decision permission.Decision
-			interactive, _ := tool.(tools.UserInteractionTool)
-			if interactive != nil && interactive.RequiresUserInteraction() && (a.isFork || a.PermissionCtx.Mode == permission.ModeDontAsk) {
-				decision = permission.Decision{Behavior: permission.BehaviorDENY, Message: "Interactive questions require a foreground attended run; report the question to the user or parent agent instead"}
-			} else if a.PermissionCtx.Mode == permission.ModeExplore {
-				// Plan mode is a hard boundary: persisted allow rules must not make
-				// a mutating tool available while the agent is planning.
-				if tc.Function.Name == "write_plan" || tool.IsReadOnly() {
-					decision = permission.Decision{Behavior: permission.BehaviorALLOW, Message: "EXPLORE mode: planning/read-only tool allowed"}
-				} else {
-					decision = permission.Decision{Behavior: permission.BehaviorDENY, Message: "EXPLORE mode: mutating tools are disabled until the plan is approved"}
-				}
-			} else {
-				decision = a.permissionEngine.CheckPermission(
-					tc.Function.Name,
-					func() permission.Decision { return tool.CheckPermissions(args, &a.PermissionCtx) },
-					args,
-				)
-			}
-
-			switch decision.Behavior {
-			case permission.BehaviorALLOW:
-				// 直接执行
-				a.toolCallStates[tc.ID] = permission.ToolCallAllowed
-				a.executeAndAppend(ctx, tc, tool, args)
-
-			case permission.BehaviorASK:
-				if hitlInputCh == nil || hitlEventCh == nil {
-					a.appendToolError(tc, "Tool requires user approval; no permission handler is available")
-					a.toolCallStates[tc.ID] = permission.ToolCallFinished
-					continue
-				}
-
-				a.toolCallStates[tc.ID] = permission.ToolCallAsking
-
-				// 发确认请求给调用者
-				req := permission.HITLConfirmRequest{
-					ReplyID: a.replyID,
-					ToolCalls: []permission.PendingToolCall{{
-						ID:             tc.ID,
-						Name:           tc.Function.Name,
-						Args:           args,
-						SuggestedRules: decision.SuggestedRules,
-					}},
-				}
-				select {
-				case hitlEventCh <- req:
-				case <-ctx.Done():
-					return "", ctx.Err()
-				}
-
-				// 阻塞等待用户回复
-				var response permission.HITLConfirmResponse
-				select {
-				case response = <-hitlInputCh:
-				case <-ctx.Done():
-					return "", ctx.Err()
-				}
-
-				// 校验 ReplyID
-				if response.ReplyID != a.replyID {
-					a.appendToolError(tc, "HITL reply_id 不匹配")
-					a.toolCallStates[tc.ID] = permission.ToolCallFinished
-					continue
-				}
-
-				// 处理用户决定
-				confirmed := false
-				for _, cr := range response.Results {
-					if cr.ToolCall.ID == tc.ID {
-						confirmed = cr.Confirmed
-						if cr.Confirmed {
-							a.toolCallStates[tc.ID] = permission.ToolCallAllowed
-							// 用户选了"始终允许" → 写入规则
-							for _, rule := range cr.Rules {
-								a.permissionEngine.AddRule(rule)
-							}
-							a.executeAndAppend(ctx, tc, tool, cr.ToolCall.Args)
-						} else {
-							a.appendToolError(tc, "操作被用户拒绝")
-							a.toolCallStates[tc.ID] = permission.ToolCallFinished
-						}
-						break
-					}
-				}
-				if !confirmed {
-					a.toolCallStates[tc.ID] = permission.ToolCallFinished
-				}
-
-			case permission.BehaviorDENY:
-				a.appendToolError(tc, decision.Message)
-				a.toolCallStates[tc.ID] = permission.ToolCallFinished
-			}
-			if err := ctx.Err(); err != nil {
-				return "", err
-			}
+		if err := a.executor.executeCalls(ctx, resp.ToolCalls, hitlInputCh, hitlEventCh); err != nil {
+			return "", err
 		}
 		a.forkBatch = nil
 	}
@@ -371,63 +251,6 @@ func (a *Agent) runLoop(
 		return "", fmt.Errorf("fork reached maximum steps (%d) without a final response", a.MaxSteps)
 	}
 	return "", nil
-}
-
-// executeAndAppend 执行工具并将结果追加到消息列表。
-func (a *Agent) executeAndAppend(ctx context.Context, tc schema.ToolCall, tool tools.Tool, args map[string]interface{}) {
-	interactive, _ := tool.(tools.UserInteractionTool)
-	waitsForUser := interactive != nil && interactive.RequiresUserInteraction()
-	if a.forks != nil && tool.Name() != "Agent" && !waitsForUser {
-		a.forks.toolMu.Lock()
-		defer a.forks.toolMu.Unlock()
-	}
-	if err := ctx.Err(); err != nil {
-		a.appendToolError(tc, err.Error())
-		return
-	}
-	var result *tools.ToolResult
-	var execErr error
-	path, backupErr := a.trackBefore(tool, args)
-	if backupErr != nil {
-		a.appendToolError(tc, "Cannot create rewind backup: "+backupErr.Error())
-		a.toolCallStates[tc.ID] = permission.ToolCallFinished
-		return
-	}
-	result, execErr = tool.Execute(ctx, args)
-	if path != "" {
-		version, err := readVersion(path)
-		if err == nil {
-			a.checkpoints[len(a.checkpoints)-1].After[path] = version
-		}
-	}
-	if execErr != nil {
-		result = &tools.ToolResult{Success: false, Error: execErr.Error()}
-	}
-
-	content := result.Content
-	if !result.Success {
-		content = "Error: " + result.Error
-	}
-	if a.Logger != nil {
-		a.Logger.LogToolResult(tc.Function.Name, args, result.Success, result.Content, result.Error)
-	}
-	a.Messages = append(a.Messages, schema.Message{
-		Role:       "tool",
-		Content:    content,
-		ToolCallID: tc.ID,
-		Name:       tc.Function.Name,
-	})
-	a.toolCallStates[tc.ID] = permission.ToolCallFinished
-}
-
-// appendToolError 追加一个工具错误结果到消息列表。
-func (a *Agent) appendToolError(tc schema.ToolCall, errMsg string) {
-	a.Messages = append(a.Messages, schema.Message{
-		Role:       "tool",
-		Content:    "Error: " + errMsg,
-		ToolCallID: tc.ID,
-		Name:       tc.Function.Name,
-	})
 }
 
 // cleanupIncompleteMessages 移除最后一个 assistant 消息及之后的所有消息（取消时清理）。
@@ -442,18 +265,4 @@ func (a *Agent) cleanupIncompleteMessages() {
 	if len(a.Messages) > 1 {
 		a.Messages = a.Messages[:1]
 	}
-}
-
-// toolArgsFromRaw normalises tool arguments (e.g. if API sent them as a JSON string).
-func toolArgsFromRaw(raw map[string]interface{}) map[string]interface{} {
-	if raw == nil {
-		return nil
-	}
-	if s, ok := raw["arguments"].(string); ok {
-		var m map[string]interface{}
-		if json.Unmarshal([]byte(s), &m) == nil {
-			return m
-		}
-	}
-	return raw
 }

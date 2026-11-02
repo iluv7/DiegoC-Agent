@@ -346,7 +346,7 @@ func TestForkStepLimitReportsFailure(t *testing.T) {
 
 func TestPermissionEngineUsesOwnSessionContext(t *testing.T) {
 	parent := New(nil, "system", 1, 1000, nil)
-	if parent.permissionEngine.Context != &parent.PermissionCtx {
+	if parent.executor.permissions.Context != &parent.PermissionCtx {
 		t.Fatal("engine uses a disconnected permission context")
 	}
 }

@@ -110,7 +110,7 @@ func TestQuestionDoesNotHoldSharedToolLock(t *testing.T) {
 		return tools.UserAnswer{Answer: "SQLite", Source: "option"}, nil
 	})
 	tc := askUserCall()
-	a.executeAndAppend(ctx, tc, a.toolByName["ask_user"], tc.Function.Arguments)
+	a.executor.execute(ctx, tc, a.toolByName["ask_user"], tc.Function.Arguments)
 }
 
 func TestBackgroundAndUnattendedQuestionsNeverOpenUI(t *testing.T) {

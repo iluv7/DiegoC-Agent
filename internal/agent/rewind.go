@@ -123,6 +123,18 @@ func (a *Agent) trackBefore(tool tools.Tool, args map[string]interface{}) (strin
 	return path, nil
 }
 
+// trackAfter records the result even if execution returned an error, so partial
+// file edits remain available to rewind.
+func (a *Agent) trackAfter(path string) {
+	if path == "" {
+		return
+	}
+	version, err := readVersion(path)
+	if err == nil {
+		a.checkpoints[len(a.checkpoints)-1].After[path] = version
+	}
+}
+
 func resolveParent(path string) (string, error) {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err == nil {
@@ -242,7 +254,7 @@ func (a *Agent) Rewind(id int, mode string) (string, error) {
 		}
 		a.PermissionCtx.Mode = cp.Mode
 		a.skipNextTokenCheck = false
-		a.toolCallStates = make(map[string]permission.ToolCallState)
+		a.executor.reset()
 		a.checkpoints = a.checkpoints[:idx]
 	}
 	return cp.Prompt, nil

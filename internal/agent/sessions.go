@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"diegoc-agent/internal/schema"
-	"diegoc-agent/internal/tools"
 )
 
 // ConversationSession is a foreground conversation, not a background task.
@@ -55,31 +54,6 @@ func (s *ConversationSessions) Switch(id string) error {
 		}
 	}
 	return fmt.Errorf("session %q not found; use /sessions to choose a session", id)
-}
-
-func (a *Agent) cloneConversation() *Agent {
-	child := NewWithPermission(a.LLM, a.SystemPrompt, a.MaxSteps, a.TokenLimit, append([]tools.Tool(nil), a.Tools...), copyPermission(a.PermissionCtx))
-	child.Messages = cloneMessages(a.Messages)
-	child.compressedSummary = a.compressedSummary
-	child.contextLimit = a.contextLimit
-	child.compactLanguage = a.compactLanguage
-	if a.memoryManager != nil {
-		child.compressedSummary = a.memoryManager.CompressedSummary()
-	}
-	child.skipNextTokenCheck = true
-	child.needsToolRepair = a.needsToolRepair
-	child.goalConfig = a.goalConfig // evaluator settings are shared; goals are not
-	child.forks = a.forks
-	// A foreground clone can itself fork. It does not inherit worker-only limits,
-	// a parent's pending reports, token billing counters, logger or mutable memory pipeline.
-	for i, t := range child.Tools {
-		if t.Name() == "Agent" {
-			bound := &ForkTool{owner: child}
-			child.Tools[i] = bound
-			child.toolByName[bound.Name()] = bound
-		}
-	}
-	return child
 }
 
 // ConversationPreview contains only user/assistant text for terminal replay.

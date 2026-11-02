@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -71,21 +70,6 @@ func (a *Agent) EnableForks(m *ForkManager) {
 	a.toolByName[t.Name()] = t
 }
 
-func copyPermission(source permission.Context) permission.Context {
-	data, _ := json.Marshal(source)
-	target := permission.NewContext()
-	_ = json.Unmarshal(data, &target)
-	return target
-}
-
-// buildForkMessages leaves every historical message intact, pairs any pending
-// tool calls with identical placeholders, and puts the unique task last.
-func buildForkMessages(history []schema.Message, task string) []schema.Message {
-	messages := cloneMessages(history)
-	messages = completeToolResults(messages, forkPlaceholder)
-	return append(messages, schema.Message{Role: "user", Content: "Complete this fork session's task using the inherited context. Report your result when finished.\n\n" + task})
-}
-
 // Fork is called by the parent runner (or the CLI while the parent is idle).
 func (m *ForkManager) Fork(parent *Agent, task string) (string, error) {
 	if parent.isFork {
@@ -94,27 +78,7 @@ func (m *ForkManager) Fork(parent *Agent, task string) (string, error) {
 	if strings.TrimSpace(task) == "" {
 		return "", errors.New("fork task is required")
 	}
-	history := parent.Messages
-	if parent.forkBatch != nil {
-		history = parent.forkBatch
-	}
-	// Stateful permission rules, tool bindings, messages and summaries are not shared.
-	list := append([]tools.Tool(nil), parent.Tools...)
-	child := NewWithPermission(parent.LLM, parent.SystemPrompt, parent.MaxSteps, parent.TokenLimit, list, copyPermission(parent.PermissionCtx))
-	child.Messages = buildForkMessages(history, task)
-	child.compressedSummary = parent.compressedSummary
-	child.contextLimit = parent.contextLimit
-	child.compactLanguage = parent.compactLanguage
-	child.skipNextTokenCheck = true // Preserve the inherited API prefix on the first request.
-	child.isFork = true
-	child.forks = m
-	for i, t := range child.Tools {
-		if t.Name() == "Agent" {
-			bound := &ForkTool{owner: child}
-			child.Tools[i] = bound
-			child.toolByName[bound.Name()] = bound
-		}
-	}
+	child := parent.cloneSession(backgroundTaskClone, m, task)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed || m.ctx.Err() != nil {

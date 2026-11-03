@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"diegoc-agent/internal/schema"
@@ -85,13 +86,27 @@ func TestAutoCompactionRetainsSystemAndUsesNonSystemSummary(t *testing.T) {
 		cfg := DefaultConfig()
 		cfg.WorkingDir = t.TempDir()
 		cfg.MaxInputLength, cfg.CompactReserve = 600, 80
-		client := manualClientFunc(func(context.Context, []schema.Message, []tools.Tool) (*schema.LLMResponse, error) {
+		summarizerCalled := make(chan struct{})
+		client := manualClientFunc(func(_ context.Context, _ []schema.Message, ts []tools.Tool) (*schema.LLMResponse, error) {
+			if len(ts) > 0 {
+				// The summarizer creates its directory before this call; our
+				// tool-free response causes no further filesystem writes.
+				defer close(summarizerCalled)
+			}
 			if valid {
 				return &schema.LLMResponse{Content: manualSummary}, nil
 			}
 			return &schema.LLMResponse{Content: "invalid"}, nil
 		})
 		mgr := NewManager(cfg, client)
+		t.Cleanup(func() {
+			select {
+			case <-summarizerCalled:
+			case <-time.After(5 * time.Second):
+				t.Error("background summarizer did not reach the mock client")
+			}
+			mgr.Close()
+		})
 		messages := []schema.Message{{Role: "system", Content: strings.Repeat("system constraints ", 100)}, {Role: "user", Content: strings.Repeat("old conversation ", 300)}, {Role: "user", Content: "recent question"}}
 		result, summary, err := mgr.PreReasoningHook(context.Background(), messages, messages[0].Content.(string))
 		if err != nil {
@@ -104,6 +119,5 @@ func TestAutoCompactionRetainsSystemAndUsesNonSystemSummary(t *testing.T) {
 		} else if !reflect.DeepEqual(result, messages) || summary != "" {
 			t.Fatal("failed automatic compaction discarded conversation")
 		}
-		mgr.Close()
 	}
 }

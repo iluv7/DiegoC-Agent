@@ -66,6 +66,7 @@ func (a *Agent) cloneSession(kind sessionCloneKind, forks *ForkManager, task str
 			child.toolByName[bound.Name()] = bound
 		}
 	}
+	child.SetMiddlewareFactories(a.middlewareFactories...)
 	return child
 }
 

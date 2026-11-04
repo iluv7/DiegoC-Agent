@@ -15,13 +15,15 @@ import (
 
 // Agent runs the conversation loop with optional tools and HITL support.
 type Agent struct {
-	PlanMode        bool
-	needsToolRepair bool
-	forks           *ForkManager
-	isFork          bool
-	forkBatch       []schema.Message
-	inboxMu         sync.Mutex
-	forkReports     []ForkEvent
+	middlewareFactories []MiddlewareFactory
+	middlewares         []any
+	PlanMode            bool
+	needsToolRepair     bool
+	forks               *ForkManager
+	isFork              bool
+	forkBatch           []schema.Message
+	inboxMu             sync.Mutex
+	forkReports         []ForkEvent
 
 	checkpoints        []checkpoint
 	checkpointSequence int
@@ -141,7 +143,9 @@ func (a *Agent) RunWithHITL(
 	inputCh <-chan permission.HITLConfirmResponse,
 	eventCh chan<- permission.HITLConfirmRequest,
 ) (string, error) {
-	return a.runLoop(ctx, inputCh, eventCh)
+	return a.reply(ctx, func(ctx context.Context) (string, error) {
+		return a.runLoop(ctx, inputCh, eventCh)
+	})
 }
 
 // runLoop 是 Run 和 RunWithHITL 共享的内部循环。
@@ -165,10 +169,6 @@ func (a *Agent) runLoop(
 	if a.Logger != nil {
 		a.Logger.StartNewRun()
 	}
-	toolNames := make([]string, 0, len(a.Tools))
-	for _, t := range a.Tools {
-		toolNames = append(toolNames, t.Name())
-	}
 	goalChecks := 0
 	for step := 0; step < a.MaxSteps; step++ {
 		select {
@@ -178,32 +178,7 @@ func (a *Agent) runLoop(
 		}
 
 		a.deliverForkReports()
-		if a.memoryManager != nil {
-			// Phase 11-12: full memory pipeline
-			systemPrompt := a.SystemPrompt
-			if a.goalActive() && len(a.Messages) > 0 {
-				systemPrompt = contentString(a.goalRequestMessages()[0])
-			}
-			keptMsgs, summary, err := a.memoryManager.PreReasoningHook(ctx, a.Messages, systemPrompt)
-			if err != nil {
-				return "", err
-			}
-			a.Messages = keptMsgs
-			if summary != "" {
-				a.compressedSummary = summary
-			}
-		} else {
-			// Legacy fallback: simple per-round summarization
-			if err := a.summarizeIfNeeded(ctx); err != nil {
-				return "", err
-			}
-		}
-
-		requestMessages := a.goalRequestMessages()
-		if a.Logger != nil {
-			a.Logger.LogRequest(requestMessages, toolNames)
-		}
-		resp, err := a.LLM.Generate(ctx, requestMessages, a.Tools)
+		resp, err := a.reasoning(ctx)
 		if err != nil {
 			return "", err
 		}
@@ -265,4 +240,57 @@ func (a *Agent) cleanupIncompleteMessages() {
 	if len(a.Messages) > 1 {
 		a.Messages = a.Messages[:1]
 	}
+}
+
+// reasoningImpl keeps context preparation inside the reasoning hook boundary.
+func (a *Agent) reasoningImpl(ctx context.Context) (*schema.LLMResponse, error) {
+	if a.memoryManager != nil {
+		// Phase 11-12: full memory pipeline
+		systemPrompt := a.SystemPrompt
+		if a.goalActive() && len(a.Messages) > 0 {
+			systemPrompt = contentString(a.goalRequestMessages()[0])
+		}
+		keptMsgs, summary, err := a.memoryManager.PreReasoningHook(ctx, a.Messages, systemPrompt)
+		if err != nil {
+			return nil, err
+		}
+		a.Messages = keptMsgs
+		if summary != "" {
+			a.compressedSummary = summary
+		}
+	} else {
+		// Legacy fallback: simple per-round summarization
+		if err := a.summarizeIfNeeded(ctx); err != nil {
+			return nil, err
+		}
+	}
+
+	requestMessages := a.goalRequestMessages()
+	if len(a.middlewares) > 0 {
+		requestMessages = cloneMessages(requestMessages)
+		for i := range requestMessages {
+			if requestMessages[i].Role != "system" {
+				continue
+			}
+			prompt := contentString(requestMessages[i])
+			for _, m := range a.middlewares {
+				if hook, ok := m.(SystemPromptMiddleware); ok {
+					var err error
+					prompt, err = hook.OnSystemPrompt(ctx, a, prompt)
+					if err != nil {
+						return nil, err
+					}
+				}
+			}
+			requestMessages[i].Content = prompt
+		}
+	}
+	if a.Logger != nil {
+		names := make([]string, 0, len(a.Tools))
+		for _, tool := range a.Tools {
+			names = append(names, tool.Name())
+		}
+		a.Logger.LogRequest(requestMessages, names)
+	}
+	return a.callModel(ctx, ModelRequest{Client: a.LLM, Messages: requestMessages, Tools: a.Tools})
 }

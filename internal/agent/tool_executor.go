@@ -154,7 +154,9 @@ func (e *toolExecutor) execute(ctx context.Context, call schema.ToolCall, tool t
 		e.reject(call, "Cannot create rewind backup: "+backupErr.Error())
 		return
 	}
-	result, execErr := tool.Execute(ctx, args)
+	result, execErr := a.act(ctx, ToolExecution{ID: call.ID, Name: call.Function.Name}, func(ctx context.Context) (*tools.ToolResult, error) {
+		return tool.Execute(ctx, args)
+	})
 	a.trackAfter(path)
 	if execErr != nil {
 		result = &tools.ToolResult{Success: false, Error: execErr.Error()}

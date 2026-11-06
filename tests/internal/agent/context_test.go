@@ -73,7 +73,7 @@ func TestCompactPreservesPlanPermissionsRewindAndSessionIsolation(t *testing.T) 
 	if err != nil || stats.After.Summary == 0 || stats.After.Total >= stats.Before.Total {
 		t.Fatalf("compact root: %+v %v", stats, err)
 	}
-	if root.Messages[0].Content != before[0].Content || root.PermissionCtx.Mode != permission.ModeExplore || !root.PlanMode || len(root.Checkpoints()) != 1 || mgr.CompressedSummary() != compactTestSummary {
+	if root.Messages[0].Content != before[0].Content || root.PermissionCtx.Mode != permission.ModeExplore || !root.PlanMode() || len(root.Checkpoints()) != 1 || mgr.CompressedSummary() != compactTestSummary {
 		t.Fatal("compaction changed plan, permissions, checkpoints, or failed to sync summary")
 	}
 	if len(root.Messages) != 2 || root.Messages[1].Role != "user" || !memory.IsSummaryMessage(root.Messages[1]) {

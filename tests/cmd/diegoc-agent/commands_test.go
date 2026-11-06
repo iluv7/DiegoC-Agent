@@ -13,6 +13,7 @@ import (
 	"diegoc-agent/internal/agent"
 	"diegoc-agent/internal/logger"
 	"diegoc-agent/internal/loop"
+	"diegoc-agent/internal/permission"
 	"diegoc-agent/internal/schema"
 )
 
@@ -84,7 +85,7 @@ func TestCommandDispatchExecuteRequiresSavedPlanAndApproval(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			d := newTestDispatcher(t)
 			a := d.sessions.Current().Agent
-			if got := d.dispatch("/PLAN"); got != (commandResult{}) || !a.PlanMode {
+			if got := d.dispatch("/PLAN"); got != (commandResult{}) || !a.PlanMode() {
 				t.Fatal("plan command did not enter planning locally")
 			}
 			if tc.savedPlan {
@@ -95,8 +96,8 @@ func TestCommandDispatchExecuteRequiresSavedPlanAndApproval(t *testing.T) {
 			prompt := &commandPrompt{answer: tc.answer, err: tc.promptErr}
 			d.state = prompt
 			got := d.dispatch("/EXECUTE")
-			if got.exit || (got.prompt != "") != tc.approved || a.PlanMode == tc.approved {
-				t.Fatalf("approval changed behavior: result=%+v plan=%v", got, a.PlanMode)
+			if got.exit || (got.prompt != "") != tc.approved || a.PlanMode() == tc.approved {
+				t.Fatalf("approval changed behavior: result=%+v plan=%v", got, a.PlanMode())
 			}
 			if tc.approved && got.prompt != "The plan in .agent_plan.md is approved. Execute it now, verify the result, and report what changed." {
 				t.Fatalf("execution instruction changed: %q", got.prompt)
@@ -105,6 +106,35 @@ func TestCommandDispatchExecuteRequiresSavedPlanAndApproval(t *testing.T) {
 				t.Fatal("missing plan prompted for approval or command entered conversation")
 			}
 		})
+	}
+}
+
+func TestCommandPlanForkClearAndApproveKeepSessionStateConsistent(t *testing.T) {
+	d := newTestDispatcher(t)
+	root := d.sessions.Current().Agent
+	root.PermissionCtx.Mode = permission.ModeAcceptEdits
+	root.AddUserMessage("parent request")
+	d.dispatch("/plan")
+	d.dispatch("/fork")
+	child := d.sessions.Current().Agent
+	child.AddUserMessage("child request")
+	d.dispatch("/clear")
+	if !child.PlanMode() || child.PermissionCtx.PrePlanMode != permission.ModeAcceptEdits || len(child.Messages) != 1 || !strings.Contains(child.Messages[0].Content.(string), "## Plan Mode\n") {
+		t.Fatal("fork/clear lost the active session's planning state")
+	}
+	if err := os.WriteFile(filepath.Join(d.workspaceDir, ".agent_plan.md"), []byte("Implement and verify."), 0600); err != nil {
+		t.Fatal(err)
+	}
+	d.state = &commandPrompt{answer: "n"}
+	if result := d.dispatch("/execute"); result.prompt != "" || !child.PlanMode() {
+		t.Fatal("declining approval left planning")
+	}
+	d.state = &commandPrompt{answer: "y"}
+	if result := d.dispatch("/execute"); result.prompt == "" || child.PlanMode() || child.PermissionCtx.Mode != permission.ModeAcceptEdits || !strings.Contains(child.Messages[0].Content.(string), "## Execute Mode\n") {
+		t.Fatal("approved child remained read-only or lost its execution instructions")
+	}
+	if !root.PlanMode() || root.PermissionCtx.PrePlanMode != permission.ModeAcceptEdits || len(root.Messages) != 2 || !strings.Contains(root.Messages[0].Content.(string), "## Plan Mode\n") {
+		t.Fatal("child approval or clear changed the parent session")
 	}
 }
 

@@ -25,8 +25,8 @@ func (a *Agent) cloneConversation() *Agent {
 //
 // NewWithPermission gives both kinds fresh execution/approval state, accounting,
 // checkpoints, inboxes, logger and goal state. Unlisted runtime fields retain
-// constructor defaults, including PlanMode; the permission mode and rendered
-// system message are inherited through their existing paths below.
+// constructor defaults. Plan mode is derived from the copied permission context;
+// its rendered system message travels with the inherited history below.
 func (a *Agent) cloneSession(kind sessionCloneKind, forks *ForkManager, task string) *Agent {
 	child := NewWithPermission(a.LLM, a.SystemPrompt, a.MaxSteps, a.TokenLimit,
 		append([]tools.Tool(nil), a.Tools...), copyPermission(a.PermissionCtx))

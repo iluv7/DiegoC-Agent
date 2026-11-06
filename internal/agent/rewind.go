@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"sort"
 
-	"diegoc-agent/internal/permission"
 	"diegoc-agent/internal/schema"
 	"diegoc-agent/internal/tools"
 )
@@ -23,7 +22,7 @@ type checkpoint struct {
 	Prompt   string
 	Messages []schema.Message
 	Summary  string
-	Mode     permission.Mode
+	PlanMode planModeSnapshot
 	Before   map[string]fileVersion
 	After    map[string]fileVersion
 }
@@ -53,7 +52,7 @@ func (a *Agent) makeCheckpoint(prompt string) {
 	if a.memoryManager != nil {
 		summary = a.memoryManager.CompressedSummary()
 	}
-	a.checkpoints = append(a.checkpoints, checkpoint{ID: a.checkpointSequence, Prompt: prompt, Messages: cloneMessages(a.Messages), Summary: summary, Mode: a.PermissionCtx.Mode, Before: map[string]fileVersion{}, After: map[string]fileVersion{}})
+	a.checkpoints = append(a.checkpoints, checkpoint{ID: a.checkpointSequence, Prompt: prompt, Messages: cloneMessages(a.Messages), Summary: summary, PlanMode: a.snapshotPlanMode(), Before: map[string]fileVersion{}, After: map[string]fileVersion{}})
 	if len(a.checkpoints) > 100 {
 		a.checkpoints = a.checkpoints[len(a.checkpoints)-100:]
 	}
@@ -252,7 +251,7 @@ func (a *Agent) Rewind(id int, mode string) (string, error) {
 		if a.memoryManager != nil {
 			a.memoryManager.SetCompressedSummary(cp.Summary)
 		}
-		a.PermissionCtx.Mode = cp.Mode
+		a.restorePlanMode(cp.PlanMode)
 		a.skipNextTokenCheck = false
 		a.executor.reset()
 		a.checkpoints = a.checkpoints[:idx]
@@ -265,6 +264,9 @@ func (a *Agent) ClearConversation() {
 	a.CancelGoal()
 	a.lastGoal = nil
 	a.Messages = []schema.Message{{Role: "system", Content: a.SystemPrompt}}
+	if a.PlanMode() {
+		a.updateModePrompt()
+	}
 	a.checkpoints = nil
 	a.compressedSummary = ""
 	a.skipNextTokenCheck = false

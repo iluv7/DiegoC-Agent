@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -58,6 +59,15 @@ type Manager struct {
 
 	llmClient llm.Client
 	mu        sync.Mutex
+
+	taskMu     sync.Mutex // serializes task registration with shutdown
+	taskCtx    context.Context
+	taskCancel context.CancelFunc
+	tasks      sync.WaitGroup
+	closed     bool
+	taskErr    error
+	closeOnce  sync.Once
+	closeErr   error
 }
 
 // NewManager creates a MemoryManager, wiring together all memory components.
@@ -97,7 +107,10 @@ func NewManager(cfg Config, llmClient llm.Client) *Manager {
 	// Summarizer threshold: same as compactor.
 	sum := NewSummarizer(handler, llmClient, compactorThreshold, cfg.Language, memoryDir)
 
+	taskCtx, taskCancel := context.WithCancel(context.Background())
 	return &Manager{
+		taskCtx:        taskCtx,
+		taskCancel:     taskCancel,
 		cfg:            cfg,
 		inMemory:       inMem,
 		contextChecker: cc,
@@ -126,6 +139,12 @@ func NewManager(cfg Config, llmClient llm.Client) *Manager {
 func (m *Manager) PreReasoningHook(ctx context.Context, messages []schema.Message, systemPrompt string) ([]schema.Message, string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.taskMu.Lock()
+	closed := m.closed
+	m.taskMu.Unlock()
+	if closed {
+		return messages, "", fmt.Errorf("memory manager is closed")
+	}
 
 	if len(messages) <= 1 {
 		// Only system prompt (or empty), nothing to compact.
@@ -167,12 +186,10 @@ func (m *Manager) PreReasoningHook(ctx context.Context, messages []schema.Messag
 	}
 
 	// ---- Step 4: Async long-term memory ----
-	// Fire-and-forget: Summarizer writes to memory/YYYY-MM-DD.md.
+	// Owned by the manager, independently of this foreground turn.
 	compactCopy := make([]schema.Message, len(toCompact))
 	copy(compactCopy, toCompact)
-	go func() {
-		_ = m.summarizer.Summarize(context.Background(), compactCopy)
-	}()
+	m.startSummary(compactCopy)
 
 	// ---- Step 5: Sync structured summary ----
 	prevSummary := m.inMemory.CompressedSummary()
@@ -287,9 +304,23 @@ func (m *Manager) SearchTool() tools.Tool {
 	return NewMemorySearchTool(m.fileStore, m.llmClient, m.cfg.Language)
 }
 
-// Close performs cleanup: stops the FileWatcher, closes the FileStore's
-// SQLite connection, and removes expired tool_result files.
+// Close cancels and joins background summaries before stopping the watcher,
+// closing storage and cleaning expired tool results. Concurrent/repeated calls
+// wait for the same shutdown and return the same error.
 func (m *Manager) Close() error {
+	m.closeOnce.Do(func() {
+		m.taskMu.Lock()
+		m.closed = true
+		m.taskCancel()
+		m.taskMu.Unlock()
+		// Never wait while holding mu: workers must be able to finish first.
+		m.tasks.Wait()
+		m.closeErr = errors.Join(m.BackgroundError(), m.closeResources())
+	})
+	return m.closeErr
+}
+
+func (m *Manager) closeResources() error {
 	m.mu.Lock()
 	fw := m.fileWatcher
 	fs := m.fileStore
@@ -299,8 +330,9 @@ func (m *Manager) Close() error {
 	if fw != nil {
 		fw.Stop()
 	}
+	var err error
 	if fs != nil {
-		_ = fs.Close()
+		err = fs.Close()
 	}
 
 	m.mu.Lock()
@@ -310,7 +342,7 @@ func (m *Manager) Close() error {
 	if deleted > 0 {
 		_ = deleted
 	}
-	return nil
+	return err
 }
 
 // WorkingDir returns the memory working directory.

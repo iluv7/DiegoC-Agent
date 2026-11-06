@@ -26,7 +26,9 @@ type application struct {
 
 func (app *application) Close() {
 	if app.memory != nil {
-		app.memory.Close()
+		if err := app.memory.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "Memory shutdown: %v\n", err)
+		}
 	}
 }
 

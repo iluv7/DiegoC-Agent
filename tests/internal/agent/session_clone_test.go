@@ -74,8 +74,8 @@ func TestSessionClonePreservesInheritanceAndIsolation(t *testing.T) {
 			if child.goal != nil || child.lastGoal != nil || child.Logger != nil || child.APITotalTokens != 0 || len(child.checkpoints) != 0 || child.checkpointSequence != 0 || len(child.forkReports) != 0 || child.forkBatch != nil {
 				t.Fatal("parent runtime state leaked into the new session")
 			}
-			if child.PlanMode || !reflect.DeepEqual(child.PermissionCtx, parent.PermissionCtx) {
-				t.Fatal("constructor runtime flags or copied permission mode changed")
+			if child.PlanMode() != parent.PlanMode() || !reflect.DeepEqual(child.PermissionCtx, parent.PermissionCtx) {
+				t.Fatal("plan mode or copied permission state changed")
 			}
 			if child.executor == parent.executor || child.executor.agent != child || child.executor.permissions.Context != &child.PermissionCtx || child.executor.replyID != "" || len(child.executor.states) != 0 {
 				t.Fatal("approval state or executor ownership leaked into the new session")

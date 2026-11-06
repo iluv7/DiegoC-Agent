@@ -76,7 +76,7 @@ func (e *toolExecutor) checkPermission(call schema.ToolCall, tool tools.Tool, ar
 	if interactive != nil && interactive.RequiresUserInteraction() && (a.isFork || a.PermissionCtx.Mode == permission.ModeDontAsk) {
 		return permission.Decision{Behavior: permission.BehaviorDENY, Message: "Interactive questions require a foreground attended run; report the question to the user or parent agent instead"}
 	}
-	if a.PermissionCtx.Mode == permission.ModeExplore {
+	if a.PlanMode() {
 		// Plan mode remains a hard boundary even with persisted allow rules.
 		if call.Function.Name == "write_plan" || tool.IsReadOnly() {
 			return permission.Decision{Behavior: permission.BehaviorALLOW, Message: "EXPLORE mode: planning/read-only tool allowed"}

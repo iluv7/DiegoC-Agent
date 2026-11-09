@@ -41,14 +41,14 @@ func normaliseAPIBase(apiBase string, provider schema.LLMProvider) string {
 }
 
 // NewClient returns an LLM client for the given provider.
-func NewClient(apiKey, apiBase, model string, provider schema.LLMProvider, retry RetryConfig) (Client, error) {
+func NewClient(apiKey, apiBase, model string, provider schema.LLMProvider, retry RetryConfig, options ...ClientOption) (Client, error) {
 	base := normaliseAPIBase(apiBase, provider)
 	switch provider {
 	case schema.ProviderAnthropic:
-		return NewAnthropicClient(apiKey, base, model, retry), nil
+		return NewAnthropicClient(apiKey, base, model, retry, options...), nil
 	case schema.ProviderOpenAI:
-		return NewOpenAIClient(apiKey, base, model, retry), nil
+		return NewOpenAIClient(apiKey, base, model, retry, options...), nil
 	default:
-		return NewAnthropicClient(apiKey, base, model, retry), nil
+		return NewAnthropicClient(apiKey, base, model, retry, options...), nil
 	}
 }

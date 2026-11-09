@@ -35,6 +35,11 @@ func (e *RetryExhaustedError) Error() string {
 	return e.LastErr.Error()
 }
 
+// Unwrap exposes the final API, network or decoding error.
+func (e *RetryExhaustedError) Unwrap() error {
+	return e.LastErr
+}
+
 // DoWithRetry runs fn up to 1 + MaxRetries times with exponential backoff.
 // If onRetry is non-nil it is called before each retry with the error and attempt (1-based).
 func DoWithRetry(ctx context.Context, cfg RetryConfig, fn func() error, onRetry func(err error, attempt int)) error {

@@ -1,14 +1,11 @@
 package llm
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"diegoc-agent/internal/schema"
 	"diegoc-agent/internal/tools"
@@ -16,21 +13,19 @@ import (
 
 // OpenAIClient implements Client for OpenAI-compatible API.
 type OpenAIClient struct {
-	apiKey     string
-	apiBase    string
-	model      string
-	httpClient *http.Client
-	retry      RetryConfig
+	apiKey    string
+	apiBase   string
+	model     string
+	transport *httpTransport
 }
 
 // NewOpenAIClient creates an OpenAI-compatible client.
-func NewOpenAIClient(apiKey, apiBase, model string, retry RetryConfig) *OpenAIClient {
+func NewOpenAIClient(apiKey, apiBase, model string, retry RetryConfig, options ...ClientOption) *OpenAIClient {
 	return &OpenAIClient{
-		apiKey:     apiKey,
-		apiBase:    strings.TrimSuffix(apiBase, "/"),
-		model:      model,
-		httpClient: &http.Client{Timeout: 120 * time.Second},
-		retry:      retry,
+		apiKey:    apiKey,
+		apiBase:   strings.TrimSuffix(apiBase, "/"),
+		model:     model,
+		transport: newHTTPTransport(retry, options...),
 	}
 }
 
@@ -40,19 +35,6 @@ func (c *OpenAIClient) url() string {
 
 // Generate calls the API with retry.
 func (c *OpenAIClient) Generate(ctx context.Context, messages []schema.Message, toolList []tools.Tool) (*schema.LLMResponse, error) {
-	var resp *schema.LLMResponse
-	err := DoWithRetry(ctx, c.retry, func() error {
-		var e error
-		resp, e = c.doGenerate(ctx, messages, toolList)
-		return e
-	}, nil)
-	if err != nil {
-		return nil, err
-	}
-	return resp, nil
-}
-
-func (c *OpenAIClient) doGenerate(ctx context.Context, messages []schema.Message, toolList []tools.Tool) (*schema.LLMResponse, error) {
 	apiMessages := c.convertMessages(messages)
 	body := map[string]interface{}{
 		"model":    c.model,
@@ -61,27 +43,7 @@ func (c *OpenAIClient) doGenerate(ctx context.Context, messages []schema.Message
 	if len(toolList) > 0 {
 		body["tools"] = c.convertTools(toolList)
 	}
-	raw, _ := json.Marshal(body)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url(), bytes.NewReader(raw))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-
-	httpResp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer httpResp.Body.Close()
-	data, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		return nil, err
-	}
-	if httpResp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("api error %d: %s", httpResp.StatusCode, string(data))
-	}
-	return c.parseResponse(data)
+	return c.transport.generate(ctx, c.url(), http.Header{"Authorization": {"Bearer " + c.apiKey}}, body, c.parseResponse)
 }
 
 func (c *OpenAIClient) convertMessages(messages []schema.Message) []map[string]interface{} {
@@ -124,8 +86,8 @@ func (c *OpenAIClient) convertTools(toolList []tools.Tool) []map[string]interfac
 
 type openAIChoice struct {
 	Message struct {
-		Content    string `json:"content"`
-		ToolCalls  []struct {
+		Content   string `json:"content"`
+		ToolCalls []struct {
 			ID       string `json:"id"`
 			Type     string `json:"type"`
 			Function struct {

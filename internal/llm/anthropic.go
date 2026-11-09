@@ -1,14 +1,10 @@
 package llm
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
-	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"diegoc-agent/internal/schema"
 	"diegoc-agent/internal/tools"
@@ -16,21 +12,19 @@ import (
 
 // AnthropicClient implements Client for Anthropic-compatible API.
 type AnthropicClient struct {
-	apiKey     string
-	apiBase    string
-	model      string
-	httpClient *http.Client
-	retry      RetryConfig
+	apiKey    string
+	apiBase   string
+	model     string
+	transport *httpTransport
 }
 
 // NewAnthropicClient creates an Anthropic-compatible client.
-func NewAnthropicClient(apiKey, apiBase, model string, retry RetryConfig) *AnthropicClient {
+func NewAnthropicClient(apiKey, apiBase, model string, retry RetryConfig, options ...ClientOption) *AnthropicClient {
 	return &AnthropicClient{
-		apiKey:     apiKey,
-		apiBase:    strings.TrimSuffix(apiBase, "/"),
-		model:      model,
-		httpClient: &http.Client{Timeout: 120 * time.Second},
-		retry:      retry,
+		apiKey:    apiKey,
+		apiBase:   strings.TrimSuffix(apiBase, "/"),
+		model:     model,
+		transport: newHTTPTransport(retry, options...),
 	}
 }
 
@@ -40,19 +34,6 @@ func (c *AnthropicClient) url() string {
 
 // Generate calls the API with retry and returns parsed response.
 func (c *AnthropicClient) Generate(ctx context.Context, messages []schema.Message, toolList []tools.Tool) (*schema.LLMResponse, error) {
-	var resp *schema.LLMResponse
-	err := DoWithRetry(ctx, c.retry, func() error {
-		var e error
-		resp, e = c.doGenerate(ctx, messages, toolList)
-		return e
-	}, nil)
-	if err != nil {
-		return nil, err
-	}
-	return resp, nil
-}
-
-func (c *AnthropicClient) doGenerate(ctx context.Context, messages []schema.Message, toolList []tools.Tool) (*schema.LLMResponse, error) {
 	system, apiMessages := c.convertMessages(messages)
 	body := map[string]interface{}{
 		"model":      c.model,
@@ -65,28 +46,7 @@ func (c *AnthropicClient) doGenerate(ctx context.Context, messages []schema.Mess
 	if len(toolList) > 0 {
 		body["tools"] = c.convertTools(toolList)
 	}
-	raw, _ := json.Marshal(body)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url(), bytes.NewReader(raw))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", c.apiKey)
-	req.Header.Set("anthropic-version", "2023-06-01")
-
-	httpResp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer httpResp.Body.Close()
-	data, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		return nil, err
-	}
-	if httpResp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("api error %d: %s", httpResp.StatusCode, string(data))
-	}
-	return c.parseResponse(data)
+	return c.transport.generate(ctx, c.url(), http.Header{"x-api-key": {c.apiKey}, "anthropic-version": {"2023-06-01"}}, body, c.parseResponse)
 }
 
 func (c *AnthropicClient) convertMessages(messages []schema.Message) (system string, apiMessages []map[string]interface{}) {

@@ -50,14 +50,15 @@ type MCPConfig struct {
 
 // MemoryConfig holds memory pipeline settings.
 type MemoryConfig struct {
-	Enabled         bool    `yaml:"enabled"`
-	WorkingDir      string  `yaml:"working_dir"`
-	MaxInputLength  int     `yaml:"max_input_length"`
-	CompactRatio    float64 `yaml:"compact_ratio"`
-	CompactReserve  int     `yaml:"compact_reserve"`
-	ToolResultKeepN int     `yaml:"tool_result_keep_n"`
-	Language        string  `yaml:"language"`
-	RetentionDays   int     `yaml:"retention_days"`
+	InjectionEnabled bool    `yaml:"injection_enabled"`
+	Enabled          bool    `yaml:"enabled"`
+	WorkingDir       string  `yaml:"working_dir"`
+	MaxInputLength   int     `yaml:"max_input_length"`
+	CompactRatio     float64 `yaml:"compact_ratio"`
+	CompactReserve   int     `yaml:"compact_reserve"`
+	ToolResultKeepN  int     `yaml:"tool_result_keep_n"`
+	Language         string  `yaml:"language"`
+	RetentionDays    int     `yaml:"retention_days"`
 	// Phase 9-10: file index + memory_search tool
 	ChromaEndpoint string `yaml:"chroma_endpoint"` // ChromaDB HTTP endpoint
 	EmbeddingModel string `yaml:"embedding_model"` // embedding API model name
@@ -103,16 +104,17 @@ type rawConfig struct {
 	TokenLimit       int        `yaml:"token_limit"`
 	Goal             GoalConfig `yaml:"goal"`
 	Memory           struct {
-		Enabled         bool    `yaml:"enabled"`
-		WorkingDir      string  `yaml:"working_dir"`
-		MaxInputLength  int     `yaml:"max_input_length"`
-		CompactRatio    float64 `yaml:"compact_ratio"`
-		CompactReserve  int     `yaml:"compact_reserve"`
-		ToolResultKeepN int     `yaml:"tool_result_keep_n"`
-		Language        string  `yaml:"language"`
-		RetentionDays   int     `yaml:"retention_days"`
-		ChromaEndpoint  string  `yaml:"chroma_endpoint"`
-		EmbeddingModel  string  `yaml:"embedding_model"`
+		InjectionEnabled *bool   `yaml:"injection_enabled"`
+		Enabled          bool    `yaml:"enabled"`
+		WorkingDir       string  `yaml:"working_dir"`
+		MaxInputLength   int     `yaml:"max_input_length"`
+		CompactRatio     float64 `yaml:"compact_ratio"`
+		CompactReserve   int     `yaml:"compact_reserve"`
+		ToolResultKeepN  int     `yaml:"tool_result_keep_n"`
+		Language         string  `yaml:"language"`
+		RetentionDays    int     `yaml:"retention_days"`
+		ChromaEndpoint   string  `yaml:"chroma_endpoint"`
+		EmbeddingModel   string  `yaml:"embedding_model"`
 	} `yaml:"memory"`
 	Tools struct {
 		EnableFileTools bool   `yaml:"enable_file_tools"`
@@ -233,6 +235,10 @@ func FromYAML(path string) (*Config, error) {
 		return nil, fmt.Errorf("goal.max_checks must be between 1 and 100")
 	}
 	// Memory defaults
+	if raw.Memory.InjectionEnabled == nil {
+		enabled := true
+		raw.Memory.InjectionEnabled = &enabled
+	}
 	if raw.Memory.WorkingDir == "" {
 		raw.Memory.WorkingDir = ".reme"
 	}
@@ -324,16 +330,17 @@ func FromYAML(path string) (*Config, error) {
 			},
 		},
 		Memory: MemoryConfig{
-			Enabled:         raw.Memory.Enabled,
-			WorkingDir:      raw.Memory.WorkingDir,
-			MaxInputLength:  raw.Memory.MaxInputLength,
-			CompactRatio:    raw.Memory.CompactRatio,
-			CompactReserve:  raw.Memory.CompactReserve,
-			ToolResultKeepN: raw.Memory.ToolResultKeepN,
-			Language:        raw.Memory.Language,
-			RetentionDays:   raw.Memory.RetentionDays,
-			ChromaEndpoint:  raw.Memory.ChromaEndpoint,
-			EmbeddingModel:  raw.Memory.EmbeddingModel,
+			InjectionEnabled: *raw.Memory.InjectionEnabled,
+			Enabled:          raw.Memory.Enabled,
+			WorkingDir:       raw.Memory.WorkingDir,
+			MaxInputLength:   raw.Memory.MaxInputLength,
+			CompactRatio:     raw.Memory.CompactRatio,
+			CompactReserve:   raw.Memory.CompactReserve,
+			ToolResultKeepN:  raw.Memory.ToolResultKeepN,
+			Language:         raw.Memory.Language,
+			RetentionDays:    raw.Memory.RetentionDays,
+			ChromaEndpoint:   raw.Memory.ChromaEndpoint,
+			EmbeddingModel:   raw.Memory.EmbeddingModel,
 		},
 	}
 	return cfg, nil

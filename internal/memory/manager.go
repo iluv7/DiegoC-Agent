@@ -159,7 +159,16 @@ func (m *Manager) CompactContext(ctx context.Context, messages []schema.Message,
 	// ---- Step 2: Calculate effective threshold ----
 	systemTokens := m.tokenCounter.CountMessages([]schema.Message{{Role: "system", Content: systemPrompt}})
 	summaryTokens := m.tokenCounter.CountText(m.inMemory.CompressedSummary())
-	effectiveThreshold := int(float64(m.cfg.MaxInputLength)*m.cfg.CompactRatio) - systemTokens - summaryTokens
+	var injection, conversation []schema.Message
+	for _, msg := range processed {
+		if IsInjectedMemory(msg) {
+			injection = append(injection, msg)
+		} else {
+			conversation = append(conversation, msg)
+		}
+	}
+	injectionTokens := m.tokenCounter.CountMessages(injection)
+	effectiveThreshold := int(float64(m.cfg.MaxInputLength)*m.cfg.CompactRatio) - systemTokens - summaryTokens - injectionTokens
 	if effectiveThreshold < m.cfg.CompactReserve {
 		effectiveThreshold = m.cfg.CompactReserve
 	}
@@ -168,7 +177,7 @@ func (m *Manager) CompactContext(ctx context.Context, messages []schema.Message,
 	m.contextChecker.threshold = effectiveThreshold
 
 	// ---- Step 3: Context check ----
-	toCompact, toKeep, valid := m.contextChecker.Check(processed)
+	toCompact, toKeep, valid := m.contextChecker.Check(conversation)
 	if !valid || len(toCompact) == 0 {
 		// Nothing to compact — return processed (with compacted tool results) unchanged.
 		return processed, "", nil
@@ -193,6 +202,7 @@ func (m *Manager) CompactContext(ctx context.Context, messages []schema.Message,
 	}
 
 	// Replace previous summaries rather than duplicating them in the kept tail.
+	result = append(result, injection...)
 	result = append(result, SummaryMessage(newSummary))
 	for _, msg := range toKeep {
 		if msg.Role != "system" && !IsSummaryMessage(msg) {

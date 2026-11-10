@@ -82,7 +82,7 @@ func (m *MemoryWriteMiddleware) submit(a *Agent, messages []schema.Message) erro
 func memoryTurns(messages []schema.Message) []schema.Message {
 	var turns []schema.Message
 	for _, msg := range messages {
-		if memory.IsSummaryMessage(msg) {
+		if memory.IsSummaryMessage(msg) || memory.IsInjectedMemory(msg) {
 			continue
 		}
 		if msg.Role != "user" && !(msg.Role == "assistant" && len(msg.ToolCalls) == 0) {

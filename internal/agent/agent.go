@@ -87,6 +87,7 @@ func NewWithPermission(client llm.Client, systemPrompt string, maxSteps int, tok
 	}
 	ag.executor = newToolExecutor(ag)
 	ag.SetMiddlewareFactories(
+		func() any { return &MemoryInjectionMiddleware{} },
 		func() any { return &ContextCompactionMiddleware{} },
 		func() any { return &MemoryWriteMiddleware{} },
 	)

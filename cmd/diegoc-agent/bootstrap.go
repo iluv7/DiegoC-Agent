@@ -112,6 +112,7 @@ func buildApplication(cfg *config.Config, workspaceOverride string) (*applicatio
 
 	ag := agent.New(client, systemPrompt, cfg.Agent.MaxSteps, cfg.Agent.TokenLimit, toolList)
 	ag.SetMiddlewareFactories(
+		func() any { return &agent.MemoryInjectionMiddleware{Disabled: !cfg.Memory.InjectionEnabled} },
 		func() any { return &agent.ContextCompactionMiddleware{} },
 		func() any { return &agent.MemoryWriteMiddleware{} },
 		func() any {

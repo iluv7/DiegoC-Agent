@@ -111,6 +111,10 @@ func buildApplication(cfg *config.Config, workspaceOverride string) (*applicatio
 	}
 
 	ag := agent.New(client, systemPrompt, cfg.Agent.MaxSteps, cfg.Agent.TokenLimit, toolList)
+	ag.SetMiddlewareFactories(func() any {
+		guard, _ := agent.NewLoopDetectionMiddleware(agent.LoopDetectionConfig{})
+		return guard
+	})
 	goalClient, err := llm.NewClient(cfg.LLM.APIKey, cfg.LLM.APIBase, cfg.Goal.Model, provider, retry)
 	if err != nil {
 		return nil, fmt.Errorf("Goal evaluator client error: %w", err)

@@ -86,6 +86,7 @@ func NewWithPermission(client llm.Client, systemPrompt string, maxSteps int, tok
 		ag.updateModePrompt()
 	}
 	ag.executor = newToolExecutor(ag)
+	ag.SetMiddlewareFactories(func() any { return &ContextCompactionMiddleware{} })
 	return ag
 }
 
@@ -101,7 +102,7 @@ func (a *Agent) AddUserMessage(content string) {
 }
 
 // SetMemoryManager configures the memory pipeline.
-// When set, PreReasoningHook replaces the legacy summarizeIfNeeded in the agent loop.
+// The context compaction middleware uses it in place of legacy summarization.
 func (a *Agent) SetMemoryManager(mgr *memory.Manager) {
 	a.memoryManager = mgr
 	if mgr != nil {
@@ -216,29 +217,8 @@ func (a *Agent) cleanupIncompleteMessages() {
 	}
 }
 
-// reasoningImpl keeps context preparation inside the reasoning hook boundary.
+// reasoningImpl assembles the outgoing request after reasoning middleware preparation.
 func (a *Agent) reasoningImpl(ctx context.Context) (*schema.LLMResponse, error) {
-	if a.memoryManager != nil {
-		// Phase 11-12: full memory pipeline
-		systemPrompt := a.SystemPrompt
-		if a.goalActive() && len(a.Messages) > 0 {
-			systemPrompt = contentString(a.goalRequestMessages()[0])
-		}
-		keptMsgs, summary, err := a.memoryManager.PreReasoningHook(ctx, a.Messages, systemPrompt)
-		if err != nil {
-			return nil, err
-		}
-		a.Messages = keptMsgs
-		if summary != "" {
-			a.compressedSummary = summary
-		}
-	} else {
-		// Legacy fallback: simple per-round summarization
-		if err := a.summarizeIfNeeded(ctx); err != nil {
-			return nil, err
-		}
-	}
-
 	requestMessages := a.goalRequestMessages()
 	if len(a.middlewares) > 0 {
 		requestMessages = cloneMessages(requestMessages)

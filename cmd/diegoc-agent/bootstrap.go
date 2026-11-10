@@ -111,7 +111,7 @@ func buildApplication(cfg *config.Config, workspaceOverride string) (*applicatio
 	}
 
 	ag := agent.New(client, systemPrompt, cfg.Agent.MaxSteps, cfg.Agent.TokenLimit, toolList)
-	ag.SetMiddlewareFactories(func() any {
+	ag.SetMiddlewareFactories(func() any { return &agent.ContextCompactionMiddleware{} }, func() any {
 		guard, _ := agent.NewLoopDetectionMiddleware(agent.LoopDetectionConfig{})
 		return guard
 	})

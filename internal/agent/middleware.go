@@ -59,6 +59,34 @@ type SystemPromptMiddleware interface {
 	OnSystemPrompt(context.Context, *Agent, string) (string, error)
 }
 
+// ContextCompactionEvent describes a prepared replacement, before it is committed.
+// Snapshots are independent of the live conversation and must be treated as read-only.
+type ContextCompactionEvent struct {
+	Before, After []schema.Message
+}
+
+// ContextCompactionObserver runs after a replacement is ready, but before old
+// messages are discarded. Returning an error keeps the conversation unchanged.
+// Implementations must not mutate Agent or the event's message snapshots.
+type ContextCompactionObserver interface {
+	OnContextCompaction(context.Context, *Agent, ContextCompactionEvent) error
+}
+
+func (a *Agent) beforeContextCompaction(ctx context.Context, after []schema.Message) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	for _, m := range a.middlewares {
+		if hook, ok := m.(ContextCompactionObserver); ok {
+			event := ContextCompactionEvent{Before: cloneMessages(a.Messages), After: cloneMessages(after)}
+			if err := hook.OnContextCompaction(ctx, a, event); err != nil {
+				return err
+			}
+		}
+	}
+	return ctx.Err()
+}
+
 // MiddlewareFactory creates a fresh middleware instance for each session.
 // The same factory is inherited by foreground and background forks. Register
 // only while the agent is idle. Factories must support concurrent fork creation.

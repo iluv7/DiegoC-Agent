@@ -86,7 +86,10 @@ func NewWithPermission(client llm.Client, systemPrompt string, maxSteps int, tok
 		ag.updateModePrompt()
 	}
 	ag.executor = newToolExecutor(ag)
-	ag.SetMiddlewareFactories(func() any { return &ContextCompactionMiddleware{} })
+	ag.SetMiddlewareFactories(
+		func() any { return &ContextCompactionMiddleware{} },
+		func() any { return &MemoryWriteMiddleware{} },
+	)
 	return ag
 }
 

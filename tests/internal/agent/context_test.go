@@ -51,7 +51,12 @@ func TestCompactPreservesPlanPermissionsRewindAndSessionIsolation(t *testing.T) 
 	root := New(client, "system", 5, 20000, nil)
 	cfg := memory.DefaultConfig()
 	cfg.WorkingDir, cfg.MaxInputLength = t.TempDir(), 30000
-	mgr := memory.NewManager(cfg, client)
+	mgr := memory.NewManager(cfg, forkClientFunc(func(ctx context.Context, msgs []schema.Message, ts []tools.Tool) (*schema.LLMResponse, error) {
+		if len(ts) > 0 {
+			return &schema.LLMResponse{Content: "memory saved"}, nil
+		}
+		return client.Generate(ctx, msgs, ts)
+	}))
 	defer mgr.Close()
 	root.SetMemoryManager(mgr)
 	root.SetPlanMode(true)

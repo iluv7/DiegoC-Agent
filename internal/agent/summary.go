@@ -49,12 +49,16 @@ func (a *Agent) summarizeIfNeeded(ctx context.Context) error {
 			if summary != "" {
 				newMessages = append(newMessages, schema.Message{
 					Role:    "user",
+					Name:    "context_summary",
 					Content: "[Assistant Execution Summary]\n\n" + summary,
 				})
 			}
 		}
 	}
 
+	if err := a.beforeContextCompaction(ctx, newMessages); err != nil {
+		return err
+	}
 	a.Messages = newMessages
 	a.skipNextTokenCheck = true
 	return nil

@@ -23,14 +23,18 @@ func (*ContextCompactionMiddleware) OnReasoning(ctx context.Context, a *Agent, n
 		if a.goalActive() && len(a.Messages) > 0 {
 			systemPrompt = contentString(a.goalRequestMessages()[0])
 		}
-		keptMsgs, summary, err := a.memoryManager.PreReasoningHook(ctx, a.Messages, systemPrompt)
+		keptMsgs, summary, err := a.memoryManager.CompactContext(ctx, a.Messages, systemPrompt)
 		if err != nil {
 			return nil, err
 		}
-		a.Messages = keptMsgs
 		if summary != "" {
+			if err := a.beforeContextCompaction(ctx, keptMsgs); err != nil {
+				return nil, err
+			}
+			a.memoryManager.SetCompressedSummary(summary)
 			a.compressedSummary = summary
 		}
+		a.Messages = keptMsgs
 	} else {
 		// Legacy fallback: simple per-round summarization
 		if err := a.summarizeIfNeeded(ctx); err != nil {

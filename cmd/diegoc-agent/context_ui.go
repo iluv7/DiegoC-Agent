@@ -21,7 +21,7 @@ func formatContextUsage(usage agent.ContextUsage) string {
 	}
 	fmt.Fprintf(&out, "Context usage (estimated, not cumulative API usage):\n")
 	fmt.Fprintf(&out, "  Total: %d / %d tokens (%.1f%% of configured budget)\n", usage.Total, usage.Limit, percentage)
-	fmt.Fprintf(&out, "  System prompt:    %d\n  Tool definitions: %d\n  Summary:          %d\n  Conversation:     %d\n  Tool results:     %d\n", usage.System, usage.ToolDefinitions, usage.Summary, usage.Conversation, usage.ToolResults)
+	fmt.Fprintf(&out, "  System prompt:    %d\n  Tool definitions: %d\n  Summary:          %d\n  Memory:           %d\n  Conversation:     %d\n  Tool results:     %d\n", usage.System, usage.ToolDefinitions, usage.Summary, usage.Memory, usage.Conversation, usage.ToolResults)
 	fmt.Fprintf(&out, "  Remaining: %d tokens\n", free)
 	fmt.Fprintf(&out, "  Auto-compact configured threshold: %d tokens (memory mode also reserves prompt/summary space)\n", usage.AutoCompactThreshold)
 	fmt.Fprintln(&out, "  Estimates include tool schemas; model tokenization and API framing may differ.")

@@ -48,3 +48,11 @@ tools:
     connect_timeout: 10.0
     execute_timeout: 60.0
     sse_read_timeout: 120.0
+
+# ===== Long-term Memory =====
+memory:
+  enabled: false
+  working_dir: ".reme"
+  # Recall a frozen snapshot on the first user reply. Requires the memory index;
+  # unavailable retrieval is skipped. This does not control memory writing.
+  injection_enabled: true

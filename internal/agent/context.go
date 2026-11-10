@@ -11,8 +11,8 @@ import (
 )
 
 type ContextUsage struct {
-	System, ToolDefinitions, Summary, Conversation, ToolResults int
-	Total, Limit, AutoCompactThreshold                          int
+	System, ToolDefinitions, Summary, Memory, Conversation, ToolResults int
+	Total, Limit, AutoCompactThreshold                                  int
 }
 
 // ContextUsage is a read-only estimate of the next request's current contents.
@@ -29,6 +29,8 @@ func (a *Agent) ContextUsage() ContextUsage {
 	for _, msg := range a.goalRequestMessages() {
 		tokens := counter.CountMessages([]schema.Message{msg})
 		switch {
+		case memory.IsInjectedMemory(msg):
+			usage.Memory += tokens
 		case memory.IsSummaryMessage(msg):
 			usage.Summary += tokens
 		case msg.Role == "system":
@@ -43,7 +45,7 @@ func (a *Agent) ContextUsage() ContextUsage {
 		data, _ := json.Marshal(tools.ToAnthropicSchema(tool))
 		usage.ToolDefinitions += counter.CountText(string(data))
 	}
-	usage.Total = usage.System + usage.ToolDefinitions + usage.Summary + usage.Conversation + usage.ToolResults
+	usage.Total = usage.System + usage.ToolDefinitions + usage.Summary + usage.Memory + usage.Conversation + usage.ToolResults
 	return usage
 }
 
@@ -71,7 +73,7 @@ func (a *Agent) Compact(ctx context.Context, instructions string) (stats Compact
 				text, _ := msg.Content.(string)
 				previous = text
 			}
-		case msg.Role == "system":
+		case msg.Role == "system" || memory.IsInjectedMemory(msg):
 			system = append(system, msg)
 		default:
 			conversation = append(conversation, msg)

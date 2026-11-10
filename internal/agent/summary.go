@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"diegoc-agent/internal/memory"
 	"diegoc-agent/internal/schema"
 )
 
@@ -21,7 +22,7 @@ func (a *Agent) summarizeIfNeeded(ctx context.Context) error {
 
 	var userIndices []int
 	for i, msg := range a.Messages {
-		if msg.Role == "user" && i > 0 {
+		if msg.Role == "user" && i > 0 && !memory.IsInjectedMemory(msg) {
 			userIndices = append(userIndices, i)
 		}
 	}
@@ -31,6 +32,11 @@ func (a *Agent) summarizeIfNeeded(ctx context.Context) error {
 
 	newMessages := make([]schema.Message, 0, len(userIndices)*2+1)
 	newMessages = append(newMessages, a.Messages[0]) // system
+	for _, msg := range a.Messages {
+		if memory.IsInjectedMemory(msg) {
+			newMessages = append(newMessages, msg)
+		}
+	}
 
 	for i, userIdx := range userIndices {
 		newMessages = append(newMessages, a.Messages[userIdx])

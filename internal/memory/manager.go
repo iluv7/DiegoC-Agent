@@ -38,11 +38,8 @@ func DefaultConfig() Config {
 	}
 }
 
-// Manager orchestrates the full memory pipeline:
-//
-//	compact_tool_result → check_context → compact_memory → summary_memory
-//
-// It is the single entry point that the Agent calls before each LLM request.
+// Manager owns context compaction, background memory extraction and retrieval.
+// These are independent service boundaries invoked by the agent middleware.
 type Manager struct {
 	cfg Config
 
@@ -60,14 +57,16 @@ type Manager struct {
 	llmClient llm.Client
 	mu        sync.Mutex
 
-	taskMu     sync.Mutex // serializes task registration with shutdown
-	taskCtx    context.Context
-	taskCancel context.CancelFunc
-	tasks      sync.WaitGroup
-	closed     bool
-	taskErr    error
-	closeOnce  sync.Once
-	closeErr   error
+	taskMu         sync.Mutex // serializes task registration with shutdown
+	taskCtx        context.Context
+	taskCancel     context.CancelFunc
+	tasks          sync.WaitGroup
+	closed         bool
+	summaryQueue   [][]schema.Message // guarded by taskMu; drained in submission order
+	summaryRunning bool
+	taskErr        error
+	closeOnce      sync.Once
+	closeErr       error
 }
 
 // NewManager creates a MemoryManager, wiring together all memory components.
@@ -123,20 +122,10 @@ func NewManager(cfg Config, llmClient llm.Client) *Manager {
 	}
 }
 
-// PreReasoningHook runs the full memory pipeline before each LLM call.
-//
-// Pipeline:
-//  1. Compact tool results (skip latest N)
-//  2. Calculate effective threshold (accounting for system prompt + existing summary)
-//  3. ContextCheck → split messages into toCompact / toKeep
-//  4. If nothing to compact → return original messages unchanged
-//  5. Async: write long-term memory via Summarizer
-//  6. Sync: generate structured summary via Compactor
-//  7. Prepend summary to kept messages, return
-//
-// Returns (messages, newSummary, error). The caller should replace its message
-// list with the returned messages and store the summary for the next call.
-func (m *Manager) PreReasoningHook(ctx context.Context, messages []schema.Message, systemPrompt string) ([]schema.Message, string, error) {
+// CompactContext prepares replacement context without scheduling memory writes or
+// committing the new summary. The caller commits only after compaction observers
+// have accepted the original messages.
+func (m *Manager) CompactContext(ctx context.Context, messages []schema.Message, systemPrompt string) ([]schema.Message, string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.taskMu.Lock()
@@ -185,21 +174,14 @@ func (m *Manager) PreReasoningHook(ctx context.Context, messages []schema.Messag
 		return processed, "", nil
 	}
 
-	// ---- Step 4: Async long-term memory ----
-	// Owned by the manager, independently of this foreground turn.
-	compactCopy := make([]schema.Message, len(toCompact))
-	copy(compactCopy, toCompact)
-	m.startSummary(compactCopy)
-
-	// ---- Step 5: Sync structured summary ----
+	// Generate a replacement before any caller submits memory or drops history.
 	prevSummary := m.inMemory.CompressedSummary()
 	newSummary := m.compactor.Compact(ctx, m.llmClient, toCompact, prevSummary)
 	if newSummary == "" {
 		return processed, "", nil
 	}
-	m.inMemory.SetCompressedSummary(newSummary)
 
-	// ---- Step 6: Build final message list ----
+	// Build the proposed replacement; the caller owns commit timing.
 	// Keep the summary separate from system instructions for both API providers.
 	result := make([]schema.Message, 0, len(toKeep)+2)
 

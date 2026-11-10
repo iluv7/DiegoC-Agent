@@ -96,7 +96,7 @@ func TestAutoCompactionRetainsSystemAndUsesNonSystemSummary(t *testing.T) {
 			mgr.Close()
 		})
 		messages := []schema.Message{{Role: "system", Content: strings.Repeat("system constraints ", 100)}, {Role: "user", Content: strings.Repeat("old conversation ", 300)}, {Role: "user", Content: "recent question"}}
-		result, summary, err := mgr.PreReasoningHook(context.Background(), messages, messages[0].Content.(string))
+		result, summary, err := mgr.CompactContext(context.Background(), messages, messages[0].Content.(string))
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -94,6 +94,9 @@ func (a *Agent) Compact(ctx context.Context, instructions string) (stats Compact
 	if memory.EstimateTokens(compacted) >= memory.EstimateTokens(a.Messages) {
 		return stats, fmt.Errorf("summary would not reduce context; conversation was kept")
 	}
+	if err := a.beforeContextCompaction(ctx, compacted); err != nil {
+		return stats, err
+	}
 	a.Messages = compacted
 	a.compressedSummary = result.Summary
 	if a.memoryManager != nil {

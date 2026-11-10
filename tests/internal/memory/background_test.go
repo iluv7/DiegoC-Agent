@@ -49,7 +49,10 @@ func TestManagerCloseCancelsAndWaitsForBackgroundSummary(t *testing.T) {
 	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }); mgr.Close() })
 	turn, cancelTurn := context.WithCancel(context.Background())
 	messages := []schema.Message{{Role: "system", Content: "system"}, {Role: "user", Content: strings.Repeat("old conversation ", 300)}, {Role: "user", Content: "recent question"}}
-	if _, _, err := mgr.PreReasoningHook(turn, messages, "system"); err != nil {
+	if _, _, err := mgr.CompactContext(turn, messages, "system"); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.QueueSummary(messages); err != nil {
 		t.Fatal(err)
 	}
 	awaitMemoryTask(t, started)
@@ -75,7 +78,7 @@ func TestManagerCloseCancelsAndWaitsForBackgroundSummary(t *testing.T) {
 	if err := mgr.Close(); err != nil || mgr.BackgroundError() != nil {
 		t.Fatalf("normal shutdown cancellation was reported as failure: %v", err)
 	}
-	if _, _, err := mgr.PreReasoningHook(context.Background(), messages, "system"); err == nil {
+	if _, _, err := mgr.CompactContext(context.Background(), messages, "system"); err == nil {
 		t.Fatal("closed manager accepted another turn")
 	}
 }
@@ -88,7 +91,7 @@ func TestManagerRetainsBackgroundFailure(t *testing.T) {
 		return nil, want
 	}))
 	t.Cleanup(func() { mgr.Close() })
-	mgr.startSummary([]schema.Message{{Role: "user", Content: "remember this"}})
+	mgr.QueueSummary([]schema.Message{{Role: "user", Content: "remember this"}})
 	mgr.tasks.Wait()
 	if !errors.Is(mgr.BackgroundError(), want) || !errors.Is(mgr.Close(), want) || !errors.Is(mgr.Close(), want) {
 		t.Fatal("background failure was lost during or after shutdown")
@@ -107,13 +110,56 @@ func TestManagerTaskRegistrationRacesWithConcurrentClose(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
 		wg.Add(2)
-		go func() { defer wg.Done(); mgr.startSummary([]schema.Message{{Role: "user", Content: "remember"}}) }()
+		go func() { defer wg.Done(); mgr.QueueSummary([]schema.Message{{Role: "user", Content: "remember"}}) }()
 		go func() { defer wg.Done(); mgr.Close() }()
 	}
 	wg.Wait()
 	before := calls.Load()
-	mgr.startSummary([]schema.Message{{Role: "user", Content: "after close"}})
+	mgr.QueueSummary([]schema.Message{{Role: "user", Content: "after close"}})
 	if calls.Load() != before {
 		t.Fatal("a task started after shutdown")
+	}
+}
+
+func TestSummaryQueueSnapshotsSerializesAndBoundsWork(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.WorkingDir = t.TempDir()
+	started, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	var payloads []string
+	mgr := NewManager(cfg, manualClientFunc(func(_ context.Context, msgs []schema.Message, _ []tools.Tool) (*schema.LLMResponse, error) {
+		payloads = append(payloads, msgs[1].Content.(string))
+		if len(payloads) == 1 {
+			close(started)
+			<-release
+		}
+		return &schema.LLMResponse{Content: "done"}, nil
+	}))
+	defer func() { once.Do(func() { close(release) }); mgr.Close() }()
+	if err := mgr.QueueSummary([]schema.Message{{Role: "user", Content: "first payload"}}); err != nil {
+		t.Fatal(err)
+	}
+	awaitMemoryTask(t, started)
+	msg := []schema.Message{{Role: "user", Content: []interface{}{map[string]interface{}{"type": "text", "text": "original snapshot"}}}}
+	if err := mgr.QueueSummary(msg); err != nil {
+		t.Fatal(err)
+	}
+	msg[0].Content.([]interface{})[0].(map[string]interface{})["text"] = "mutated snapshot"
+	for i := 1; i < maxQueuedSummaries; i++ {
+		if err := mgr.QueueSummary([]schema.Message{{Role: "user", Content: "later payload"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := mgr.QueueSummary([]schema.Message{{Role: "user", Content: "overflow"}}); err == nil {
+		t.Fatal("unbounded queue")
+	}
+	once.Do(func() { close(release) })
+	mgr.tasks.Wait()
+	if len(payloads) != maxQueuedSummaries+1 || !strings.Contains(payloads[0], "first payload") || !strings.Contains(payloads[1], "original snapshot") || strings.Contains(payloads[1], "mutated snapshot") {
+		t.Fatalf("snapshot or FIFO failure: %v", payloads)
+	}
+	mgr.Close()
+	if err := mgr.QueueSummary([]schema.Message{{Role: "user", Content: "closed"}}); err == nil {
+		t.Fatal("closed queue accepted work")
 	}
 }

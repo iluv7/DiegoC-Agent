@@ -65,6 +65,10 @@ WriteFile(ctx, path string, data []byte) error
 已实现的后端：
 
 - `LocalBackend`：宿主机，原生 `os.*` 覆盖多数派生方法，支持后台进程。
+- `DockerBackend`：通过 `docker exec` / `cat` / 标准输入写文件；路径语义固定
+  为 POSIX。`HostPaths()` 表示容器工作区是否是宿主机路径的 bind mount。
+- `K8sBackend`：通过 `kubectl exec` / `cat` / 标准输入读写 pod 内文件；
+  `kubectl exec` 没有 `-w`，需要 cwd 时用 `sh -c 'cd "$1" && exec "$@"'` 包一层。
 
 新增一个后端只需要：
 
@@ -95,10 +99,20 @@ Provision(ctx) (backend.Backend, error)  // 创建/连接环境，返回 backend
 Teardown(ctx) error                      // 释放环境
 ```
 
-`LocalWorkspace` 在宿主机目录上绑定 `LocalBackend`。未来接入容器或远端
-沙箱时，工作区子类负责环境的创建/连接，并把 backend 的工作目录暴露给
-工具即可；若文件不再位于宿主机，应把 `HostPaths()` 设为 `false`，这样
-rewind 等依赖宿主路径的功能会自动跳过。
+`LocalWorkspace` 在宿主机目录上绑定 `LocalBackend`；`DockerWorkspace`
+负责容器的 inspect / run / start / rm，并把工作区以**同路径 bind mount**
+挂进容器，因此：
+
+- 系统提示里的工作区路径在容器内外一致；
+- `AGENTS.md`、`.agent_plan.md`、笔记文件等仍然直接可见；
+- 未来接入真正隔离的远端沙箱时，只需把 `HostPaths` 设为 `false`。
+
+`K8sWorkspace` 负责 pod 的 get / apply / delete 和 Running 轮询：
+
+- 默认挂 `emptyDir`，设置 `persistent_volume_claim` 时改挂已有 PVC；
+- pod 已 Running 时直接复用，Failed/Succeeded 时删除重建；
+- `HostPaths()` 为 false，文件只在 pod 内，系统提示会使用 pod 的 workdir
+  而不是宿主机目录，rewind/diff 会自动跳过。
 
 工具通过 `workspace.ListTools` 获得 backend，例如：
 
@@ -117,13 +131,39 @@ rewind 等依赖宿主路径的功能会自动跳过。
 
 ```yaml
 workspace:
-  backend: "local"   # 目前仅 local；容器/远端后端在其上扩展
+  backend: "local"          # local | docker | k8s
+  docker:
+    container: "diegoc-agent-workspace"
+    image: "debian:bookworm-slim"
+    remove_on_close: false  # 默认保留容器，下次运行直接复用
+  k8s:
+    namespace: "default"
+    pod: "diegoc-agent-workspace"
+    container: "agent"
+    image: "debian:bookworm-slim"
+    workdir: "/workspace"
+    persistent_volume_claim: ""   # 设置后挂已有 PVC，否则用 emptyDir
+    image_pull_policy: "IfNotPresent"
+    remove_on_close: false        # 默认保留 pod，下次运行直接复用
+    start_timeout_seconds: 120
 ```
 
 - `backend: local`：与之前行为一致，直接在宿主机执行。
+- `backend: docker`：首次运行创建容器并在其中执行命令；工作区目录以相同
+  绝对路径 mount 进容器。`remove_on_close: true` 时退出会 `docker rm -f`。
+- `backend: k8s`：需要本机已配置好 `kubectl`（或用 `kubeconfig` / `context`
+  指定）。首次运行 `kubectl apply` 创建 pod，之后复用；`remove_on_close: true`
+  时退出会 `kubectl delete pod`。
+- Docker 后端目前不支持 Windows 宿主（同路径 bind mount 不成立）。
 
 ## 已知边界
 
+- `docker` 后端使用 `sh -c`（镜像保证有 `/bin/sh`）；依赖 bash 扩展语法的
+  命令请显式调用 `bash -c`，或把镜像换成带 bash 的基础镜像。
+- `k8s` 后端的文件只存在于 pod 内：宿主机上的 `AGENTS.md`、`.agent_plan.md`
+  不会被加载/同步，`/diff`、rewind 等宿主侧 UI 功能不适用；需要持久化时
+  挂 PVC。
+- `kubectl exec` 超时只能终止本地 kubectl 进程，远端命令不保证被杀死。
 - 后台命令、rewind 快照依赖 backend 能力：后台需要
   `BackgroundStarter`，快照需要 `HostPaths() == true`，否则 rewind 会跳过。
-- 容器/远端后端尚未实现；按上面的 3 个原语补齐即可，工作区层无需改动。
+- 云沙箱（E2B 等）尚未实现；按上面的 3 个原语补齐即可，工作区层无需改动。

@@ -105,7 +105,13 @@ func buildApplication(cfg *config.Config, workspaceOverride string) (*applicatio
 	if skillLoader != nil {
 		skillsMetadata = skillLoader.GetSkillsMetadataPrompt()
 	}
-	systemPrompt, instructionsPath, err := buildSystemPrompt(systemPrompt, workspaceDir, skillsMetadata)
+	// Remote workspaces are not backed by host files, so the prompt must
+	// describe the backend's workdir rather than the host directory.
+	promptWorkspace := workspaceDir
+	if be, beErr := ws.Backend(); beErr == nil && !be.HostPaths() {
+		promptWorkspace = ws.Workdir()
+	}
+	systemPrompt, instructionsPath, err := buildSystemPrompt(systemPrompt, promptWorkspace, skillsMetadata)
 	if err != nil {
 		return nil, fmt.Errorf("Project instructions error: %w", err)
 	}
@@ -180,6 +186,29 @@ func buildWorkspace(cfg *config.Config, workspaceDir string) (workspace.Workspac
 		return workspace.NewLocal(workspace.LocalOptions{
 			ID:      "local",
 			Workdir: workspaceDir,
+		}), nil
+	case "docker":
+		return workspace.NewDocker(workspace.DockerOptions{
+			Container:     cfg.Workspace.Docker.Container,
+			Image:         cfg.Workspace.Docker.Image,
+			Workdir:       workspaceDir,
+			RemoveOnClose: cfg.Workspace.Docker.RemoveOnClose,
+		}), nil
+	case "k8s":
+		return workspace.NewK8s(workspace.K8sOptions{
+			Kubeconfig:            cfg.Workspace.K8s.Kubeconfig,
+			Context:               cfg.Workspace.K8s.Context,
+			Namespace:             cfg.Workspace.K8s.Namespace,
+			Pod:                   cfg.Workspace.K8s.Pod,
+			Container:             cfg.Workspace.K8s.Container,
+			Image:                 cfg.Workspace.K8s.Image,
+			Workdir:               cfg.Workspace.K8s.Workdir,
+			PersistentVolumeClaim: cfg.Workspace.K8s.PersistentVolumeClaim,
+			ImagePullPolicy:       cfg.Workspace.K8s.ImagePullPolicy,
+			RemoveOnClose:         cfg.Workspace.K8s.RemoveOnClose,
+			StartTimeout: time.Duration(
+				cfg.Workspace.K8s.StartTimeoutSeconds,
+			) * time.Second,
 		}), nil
 	default:
 		return nil, fmt.Errorf("unsupported workspace backend %q", cfg.Workspace.Backend)

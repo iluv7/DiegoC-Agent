@@ -11,11 +11,12 @@ func TestWorkspaceBackendDefaultsAndValidation(t *testing.T) {
 		name    string
 		yaml    string
 		backend string
+		image   string
 		valid   bool
 	}{
-		{"default", "", "local", true},
-		{"explicit", "workspace:\n  backend: LOCAL\n", "local", true},
-		{"invalid", "workspace:\n  backend: firecracker\n", "", false},
+		{"default", "", "local", "debian:bookworm-slim", true},
+		{"docker", "workspace:\n  backend: docker\n  docker:\n    container: box\n    image: alpine:3.20\n", "docker", "alpine:3.20", true},
+		{"invalid", "workspace:\n  backend: firecracker\n", "", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config.yaml")
@@ -32,7 +33,7 @@ func TestWorkspaceBackendDefaultsAndValidation(t *testing.T) {
 			if err != nil {
 				t.Fatalf("load: %v", err)
 			}
-			if cfg.Workspace.Backend != tc.backend {
+			if cfg.Workspace.Backend != tc.backend || cfg.Workspace.Docker.Image != tc.image {
 				t.Fatalf("workspace config: %+v", cfg.Workspace)
 			}
 		})

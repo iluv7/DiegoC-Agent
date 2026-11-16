@@ -77,6 +77,11 @@ func (b *LocalBackend) exec(ctx context.Context, command []string, opts ExecOpti
 	}
 
 	cmd := exec.CommandContext(runCtx, command[0], command[1:]...)
+	// Put the command in its own process group and terminate the whole
+	// group on timeout. Killing only the direct child leaves grandchildren
+	// holding the output pipes, so Wait would block until they exit.
+	configureProcessGroup(cmd)
+	cmd.Cancel = func() error { return terminateProcessGroup(cmd) }
 	cwd := opts.Cwd
 	if cwd == "" {
 		cwd = b.workdir
@@ -246,6 +251,7 @@ func (b *LocalBackend) StartBackground(command []string, cwd string) (Background
 		return nil, errors.New("backend: empty command")
 	}
 	cmd := exec.Command(command[0], command[1:]...)
+	configureProcessGroup(cmd)
 	if cwd == "" {
 		cwd = b.workdir
 	}
@@ -298,12 +304,15 @@ func (p *localBackgroundProcess) Output() string {
 	return p.out.String()
 }
 
-// Kill terminates the process. Killing an exited process is not an error.
+// Kill terminates the process group. Killing an exited process is not an
+// error.
 func (p *localBackgroundProcess) Kill() error {
-	if p.cmd.Process == nil {
+	select {
+	case <-p.done:
 		return nil
+	default:
 	}
-	err := p.cmd.Process.Kill()
+	err := terminateProcessGroup(p.cmd)
 	if errors.Is(err, os.ErrProcessDone) {
 		return nil
 	}

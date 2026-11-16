@@ -117,7 +117,9 @@ func TestLocalBackendExecExitAndTimeout(t *testing.T) {
 	}
 
 	start := time.Now()
-	res, err = b.Exec(ctx, []string{"sh", "-c", "sleep 2"}, ExecOptions{Timeout: 100 * time.Millisecond})
+	// The backgrounded sleep forces a grandchild that inherits the output
+	// pipes; killing only the shell would leave Wait blocked until it exits.
+	res, err = b.Exec(ctx, []string{"sh", "-c", "sleep 2 & wait"}, ExecOptions{Timeout: 100 * time.Millisecond})
 	if err != nil {
 		t.Fatalf("timeout exec: %v", err)
 	}

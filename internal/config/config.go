@@ -42,10 +42,19 @@ type GoalConfig struct {
 	MaxChecks int    `yaml:"max_checks"`
 }
 
+// DockerWorkspaceConfig configures the container-backed workspace.
+type DockerWorkspaceConfig struct {
+	Container     string `yaml:"container"`
+	Image         string `yaml:"image"`
+	RemoveOnClose bool   `yaml:"remove_on_close"`
+}
+
 // WorkspaceConfig selects where tools execute.
 type WorkspaceConfig struct {
-	// Backend is "local": tools run directly on the host.
-	Backend string `yaml:"backend"`
+	// Backend is "local" (host) or "docker" (container with the host
+	// workspace bind-mounted at the same path).
+	Backend string                `yaml:"backend"`
+	Docker  DockerWorkspaceConfig `yaml:"docker"`
 }
 
 // MCPConfig holds MCP timeout settings.
@@ -113,6 +122,11 @@ type rawConfig struct {
 	Goal             GoalConfig `yaml:"goal"`
 	Workspace        struct {
 		Backend string `yaml:"backend"`
+		Docker  struct {
+			Container     string `yaml:"container"`
+			Image         string `yaml:"image"`
+			RemoveOnClose bool   `yaml:"remove_on_close"`
+		} `yaml:"docker"`
 	} `yaml:"workspace"`
 	Memory           struct {
 		InjectionEnabled *bool   `yaml:"injection_enabled"`
@@ -251,12 +265,18 @@ func FromYAML(path string) (*Config, error) {
 	}
 	raw.Workspace.Backend = strings.ToLower(raw.Workspace.Backend)
 	switch raw.Workspace.Backend {
-	case "local":
+	case "local", "docker":
 	default:
 		return nil, fmt.Errorf(
-			"workspace.backend must be \"local\", got %q",
+			"workspace.backend must be \"local\" or \"docker\", got %q",
 			raw.Workspace.Backend,
 		)
+	}
+	if raw.Workspace.Docker.Container == "" {
+		raw.Workspace.Docker.Container = "diegoc-agent-workspace"
+	}
+	if raw.Workspace.Docker.Image == "" {
+		raw.Workspace.Docker.Image = "debian:bookworm-slim"
 	}
 	// Memory defaults
 	if raw.Memory.InjectionEnabled == nil {
@@ -368,6 +388,11 @@ func FromYAML(path string) (*Config, error) {
 		},
 		Workspace: WorkspaceConfig{
 			Backend: raw.Workspace.Backend,
+			Docker: DockerWorkspaceConfig{
+				Container:     raw.Workspace.Docker.Container,
+				Image:         raw.Workspace.Docker.Image,
+				RemoveOnClose: raw.Workspace.Docker.RemoveOnClose,
+			},
 		},
 	}
 	return cfg, nil

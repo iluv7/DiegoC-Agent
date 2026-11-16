@@ -49,12 +49,29 @@ type DockerWorkspaceConfig struct {
 	RemoveOnClose bool   `yaml:"remove_on_close"`
 }
 
+// K8sWorkspaceConfig configures the pod-backed workspace.
+type K8sWorkspaceConfig struct {
+	Kubeconfig            string `yaml:"kubeconfig"`
+	Context               string `yaml:"context"`
+	Namespace             string `yaml:"namespace"`
+	Pod                   string `yaml:"pod"`
+	Container             string `yaml:"container"`
+	Image                 string `yaml:"image"`
+	Workdir               string `yaml:"workdir"`
+	PersistentVolumeClaim string `yaml:"persistent_volume_claim"`
+	ImagePullPolicy       string `yaml:"image_pull_policy"`
+	RemoveOnClose         bool   `yaml:"remove_on_close"`
+	StartTimeoutSeconds   int    `yaml:"start_timeout_seconds"`
+}
+
 // WorkspaceConfig selects where tools execute.
 type WorkspaceConfig struct {
-	// Backend is "local" (host) or "docker" (container with the host
-	// workspace bind-mounted at the same path).
+	// Backend is "local" (host), "docker" (container with the host
+	// workspace bind-mounted at the same path) or "k8s" (pod reached
+	// through kubectl).
 	Backend string                `yaml:"backend"`
 	Docker  DockerWorkspaceConfig `yaml:"docker"`
+	K8s     K8sWorkspaceConfig    `yaml:"k8s"`
 }
 
 // MCPConfig holds MCP timeout settings.
@@ -127,6 +144,19 @@ type rawConfig struct {
 			Image         string `yaml:"image"`
 			RemoveOnClose bool   `yaml:"remove_on_close"`
 		} `yaml:"docker"`
+		K8s struct {
+			Kubeconfig            string `yaml:"kubeconfig"`
+			Context               string `yaml:"context"`
+			Namespace             string `yaml:"namespace"`
+			Pod                   string `yaml:"pod"`
+			Container             string `yaml:"container"`
+			Image                 string `yaml:"image"`
+			Workdir               string `yaml:"workdir"`
+			PersistentVolumeClaim string `yaml:"persistent_volume_claim"`
+			ImagePullPolicy       string `yaml:"image_pull_policy"`
+			RemoveOnClose         bool   `yaml:"remove_on_close"`
+			StartTimeoutSeconds   int    `yaml:"start_timeout_seconds"`
+		} `yaml:"k8s"`
 	} `yaml:"workspace"`
 	Memory           struct {
 		InjectionEnabled *bool   `yaml:"injection_enabled"`
@@ -265,10 +295,10 @@ func FromYAML(path string) (*Config, error) {
 	}
 	raw.Workspace.Backend = strings.ToLower(raw.Workspace.Backend)
 	switch raw.Workspace.Backend {
-	case "local", "docker":
+	case "local", "docker", "k8s":
 	default:
 		return nil, fmt.Errorf(
-			"workspace.backend must be \"local\" or \"docker\", got %q",
+			"workspace.backend must be \"local\", \"docker\" or \"k8s\", got %q",
 			raw.Workspace.Backend,
 		)
 	}
@@ -277,6 +307,27 @@ func FromYAML(path string) (*Config, error) {
 	}
 	if raw.Workspace.Docker.Image == "" {
 		raw.Workspace.Docker.Image = "debian:bookworm-slim"
+	}
+	if raw.Workspace.K8s.Namespace == "" {
+		raw.Workspace.K8s.Namespace = "default"
+	}
+	if raw.Workspace.K8s.Pod == "" {
+		raw.Workspace.K8s.Pod = "diegoc-agent-workspace"
+	}
+	if raw.Workspace.K8s.Container == "" {
+		raw.Workspace.K8s.Container = "agent"
+	}
+	if raw.Workspace.K8s.Image == "" {
+		raw.Workspace.K8s.Image = "debian:bookworm-slim"
+	}
+	if raw.Workspace.K8s.Workdir == "" {
+		raw.Workspace.K8s.Workdir = "/workspace"
+	}
+	if raw.Workspace.K8s.ImagePullPolicy == "" {
+		raw.Workspace.K8s.ImagePullPolicy = "IfNotPresent"
+	}
+	if raw.Workspace.K8s.StartTimeoutSeconds <= 0 {
+		raw.Workspace.K8s.StartTimeoutSeconds = 120
 	}
 	// Memory defaults
 	if raw.Memory.InjectionEnabled == nil {
@@ -392,6 +443,19 @@ func FromYAML(path string) (*Config, error) {
 				Container:     raw.Workspace.Docker.Container,
 				Image:         raw.Workspace.Docker.Image,
 				RemoveOnClose: raw.Workspace.Docker.RemoveOnClose,
+			},
+			K8s: K8sWorkspaceConfig{
+				Kubeconfig:            raw.Workspace.K8s.Kubeconfig,
+				Context:               raw.Workspace.K8s.Context,
+				Namespace:             raw.Workspace.K8s.Namespace,
+				Pod:                   raw.Workspace.K8s.Pod,
+				Container:             raw.Workspace.K8s.Container,
+				Image:                 raw.Workspace.K8s.Image,
+				Workdir:               raw.Workspace.K8s.Workdir,
+				PersistentVolumeClaim: raw.Workspace.K8s.PersistentVolumeClaim,
+				ImagePullPolicy:       raw.Workspace.K8s.ImagePullPolicy,
+				RemoveOnClose:         raw.Workspace.K8s.RemoveOnClose,
+				StartTimeoutSeconds:   raw.Workspace.K8s.StartTimeoutSeconds,
 			},
 		},
 	}

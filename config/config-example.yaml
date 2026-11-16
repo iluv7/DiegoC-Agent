@@ -32,12 +32,25 @@ token_limit: 80000  # trigger context summarization when exceeded
 # local  - file and shell tools run directly on the host (default)
 # docker - tools run inside a container; workspace_dir is bind-mounted at the
 #          same absolute path, so edits remain visible on the host
+# k8s    - tools run inside a Kubernetes pod (kubectl must be configured)
 workspace:
   backend: "local"
   docker:
     container: "diegoc-agent-workspace"
     image: "debian:bookworm-slim"
     remove_on_close: false  # keep the container so files/installs survive restarts
+  k8s:
+    # kubeconfig: "~/.kube/config"  # empty uses kubectl's default lookup
+    # context: "my-context"         # empty uses the current context
+    namespace: "default"
+    pod: "diegoc-agent-workspace"
+    container: "agent"
+    image: "debian:bookworm-slim"
+    workdir: "/workspace"
+    # persistent_volume_claim: ""   # set to mount an existing PVC instead of emptyDir
+    image_pull_policy: "IfNotPresent"
+    remove_on_close: false          # keep the pod so files survive restarts
+    start_timeout_seconds: 120
 
 # ===== Goal Stop Check =====
 # Same API key/base/provider as the main model. Select a smaller compatible

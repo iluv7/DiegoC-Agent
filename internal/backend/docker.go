@@ -182,8 +182,3 @@ func (d *DockerBackend) WriteFile(ctx context.Context, path string, data []byte)
 	}
 	return nil
 }
-
-// isMissingFile recognizes the message `cat` prints for a missing path.
-func isMissingFile(stderr []byte) bool {
-	return strings.Contains(strings.ToLower(string(stderr)), "no such file")
-}

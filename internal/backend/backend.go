@@ -386,3 +386,8 @@ func (b *Base) Abs(path, cwd string) string {
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
+
+// isMissingFile recognizes the message cat prints for a missing path.
+func isMissingFile(stderr []byte) bool {
+	return strings.Contains(strings.ToLower(string(stderr)), "no such file")
+}

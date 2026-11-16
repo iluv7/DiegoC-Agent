@@ -2,11 +2,12 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	"io/fs"
 	"strings"
 
+	"diegoc-agent/internal/backend"
 	"diegoc-agent/internal/permission"
 )
 
@@ -32,6 +33,11 @@ func truncateByTokens(text string, maxTokens int) string {
 // ReadTool reads file contents with line numbers.
 type ReadTool struct {
 	WorkspaceDir string
+	Backend      backend.Backend
+}
+
+func (t *ReadTool) resolveBackend() backend.Backend {
+	return resolveBackend(t.Backend, t.WorkspaceDir)
 }
 
 func (t *ReadTool) Name() string { return "read_file" }
@@ -57,14 +63,11 @@ func (t *ReadTool) Execute(ctx context.Context, args map[string]interface{}) (*T
 	if path == "" {
 		return &ToolResult{Success: false, Error: "path is required"}, nil
 	}
-	fullPath := path
-	if !filepath.IsAbs(path) {
-		fullPath = filepath.Join(t.WorkspaceDir, path)
-	}
-	fullPath = filepath.Clean(fullPath)
-	data, err := os.ReadFile(fullPath)
+	be := t.resolveBackend()
+	fullPath := be.Abs(path, be.Workdir())
+	data, err := be.ReadFile(ctx, fullPath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return &ToolResult{Success: false, Error: "File not found: " + path}, nil
 		}
 		return &ToolResult{Success: false, Error: err.Error()}, nil
@@ -106,6 +109,18 @@ func (t *ReadTool) Execute(ctx context.Context, args map[string]interface{}) (*T
 // WriteTool writes content to a file.
 type WriteTool struct {
 	WorkspaceDir string
+	Backend      backend.Backend
+}
+
+func (t *WriteTool) resolveBackend() backend.Backend {
+	return resolveBackend(t.Backend, t.WorkspaceDir)
+}
+
+// SupportsHostCheckpoints reports whether rewind can snapshot this tool's
+// files from the host filesystem. Remote backends that do not expose host
+// paths cannot be checkpointed.
+func (t *WriteTool) SupportsHostCheckpoints() bool {
+	return t.Backend == nil || t.Backend.HostPaths()
 }
 
 func (t *WriteTool) Name() string { return "write_file" }
@@ -131,15 +146,9 @@ func (t *WriteTool) Execute(ctx context.Context, args map[string]interface{}) (*
 	if path == "" {
 		return &ToolResult{Success: false, Error: "path is required"}, nil
 	}
-	fullPath := path
-	if !filepath.IsAbs(path) {
-		fullPath = filepath.Join(t.WorkspaceDir, path)
-	}
-	fullPath = filepath.Clean(fullPath)
-	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
-		return &ToolResult{Success: false, Error: err.Error()}, nil
-	}
-	if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
+	be := t.resolveBackend()
+	fullPath := be.Abs(path, be.Workdir())
+	if err := be.WriteFile(ctx, fullPath, []byte(content)); err != nil {
 		return &ToolResult{Success: false, Error: err.Error()}, nil
 	}
 	return &ToolResult{Success: true, Content: "Successfully wrote to " + fullPath}, nil
@@ -148,6 +157,17 @@ func (t *WriteTool) Execute(ctx context.Context, args map[string]interface{}) (*
 // EditTool edits a file by exact string replacement.
 type EditTool struct {
 	WorkspaceDir string
+	Backend      backend.Backend
+}
+
+func (t *EditTool) resolveBackend() backend.Backend {
+	return resolveBackend(t.Backend, t.WorkspaceDir)
+}
+
+// SupportsHostCheckpoints reports whether rewind can snapshot this tool's
+// files from the host filesystem.
+func (t *EditTool) SupportsHostCheckpoints() bool {
+	return t.Backend == nil || t.Backend.HostPaths()
 }
 
 func (t *EditTool) Name() string { return "edit_file" }
@@ -175,14 +195,11 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]interface{}) (*T
 	if path == "" || oldStr == "" {
 		return &ToolResult{Success: false, Error: "path and old_str are required"}, nil
 	}
-	fullPath := path
-	if !filepath.IsAbs(path) {
-		fullPath = filepath.Join(t.WorkspaceDir, path)
-	}
-	fullPath = filepath.Clean(fullPath)
-	data, err := os.ReadFile(fullPath)
+	be := t.resolveBackend()
+	fullPath := be.Abs(path, be.Workdir())
+	data, err := be.ReadFile(ctx, fullPath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return &ToolResult{Success: false, Error: "File not found: " + path}, nil
 		}
 		return &ToolResult{Success: false, Error: err.Error()}, nil
@@ -192,7 +209,7 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]interface{}) (*T
 		return &ToolResult{Success: false, Error: "Text not found in file: " + oldStr}, nil
 	}
 	newContent := strings.Replace(content, oldStr, newStr, 1)
-	if err := os.WriteFile(fullPath, []byte(newContent), 0644); err != nil {
+	if err := be.WriteFile(ctx, fullPath, []byte(newContent)); err != nil {
 		return &ToolResult{Success: false, Error: err.Error()}, nil
 	}
 	return &ToolResult{Success: true, Content: "Successfully edited " + fullPath}, nil
@@ -212,10 +229,8 @@ func (t *WriteTool) CheckPermissions(args map[string]interface{}, pCtx *permissi
 	if pathArg == "" {
 		return permission.Decision{Behavior: permission.BehaviorDENY, Message: "路径不能为空"}
 	}
-	absPath := pathArg
-	if !filepath.IsAbs(pathArg) {
-		absPath = filepath.Join(t.WorkspaceDir, pathArg)
-	}
+	be := t.resolveBackend()
+	absPath := be.Abs(pathArg, be.Workdir())
 	for _, dp := range dangerousPaths {
 		if strings.Contains(absPath, dp) {
 			return permission.Decision{
@@ -223,7 +238,7 @@ func (t *WriteTool) CheckPermissions(args map[string]interface{}, pCtx *permissi
 				Message:  "写入目标可能是危险路径: " + absPath,
 				SuggestedRules: []permission.Rule{{
 					ToolName:    "write_file",
-					RuleContent: filepath.Dir(absPath) + "/**",
+					RuleContent: be.DirName(absPath) + "/**",
 					Behavior:    permission.BehaviorALLOW,
 					Source:      "suggestion",
 				}},
@@ -244,10 +259,8 @@ func (t *EditTool) CheckPermissions(args map[string]interface{}, pCtx *permissio
 	if pathArg == "" {
 		return permission.Decision{Behavior: permission.BehaviorDENY, Message: "路径不能为空"}
 	}
-	absPath := pathArg
-	if !filepath.IsAbs(pathArg) {
-		absPath = filepath.Join(t.WorkspaceDir, pathArg)
-	}
+	be := t.resolveBackend()
+	absPath := be.Abs(pathArg, be.Workdir())
 	for _, dp := range dangerousPaths {
 		if strings.Contains(absPath, dp) {
 			return permission.Decision{
@@ -255,7 +268,7 @@ func (t *EditTool) CheckPermissions(args map[string]interface{}, pCtx *permissio
 				Message:  "编辑目标可能是危险路径: " + absPath,
 				SuggestedRules: []permission.Rule{{
 					ToolName:    "edit_file",
-					RuleContent: filepath.Dir(absPath) + "/**",
+					RuleContent: be.DirName(absPath) + "/**",
 					Behavior:    permission.BehaviorALLOW,
 					Source:      "suggestion",
 				}},

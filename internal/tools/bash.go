@@ -1,17 +1,15 @@
 package tools
 
 import (
-	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"os/exec"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
 
+	"diegoc-agent/internal/backend"
 	"diegoc-agent/internal/permission"
 )
 
@@ -21,11 +19,9 @@ var (
 )
 
 type backgroundShell struct {
-	ID       string
-	Command  string
-	cmd      *exec.Cmd
-	output   []string
-	outputMu sync.Mutex
+	ID      string
+	Command string
+	proc    backend.BackgroundProcess
 }
 
 func getBashShell(bashID string) *backgroundShell {
@@ -63,26 +59,34 @@ func listBashIDs() []string {
 }
 
 // BashTool runs shell commands in workspace (foreground or background).
+//
+// Commands are not executed directly: they are handed to the workspace
+// backend, which decides whether they run on the host or inside a container.
 type BashTool struct {
 	WorkspaceDir string
+	Backend      backend.Backend
+}
+
+func (t *BashTool) resolveBackend() backend.Backend {
+	return resolveBackend(t.Backend, t.WorkspaceDir)
 }
 
 func (t *BashTool) Name() string { return "bash" }
 
 func (t *BashTool) Description() string {
-	if runtime.GOOS == "windows" {
+	if t.resolveBackend().OS() == "windows" {
 		return "Execute PowerShell commands in foreground or background. For terminal operations like git, npm, docker. Parameters: command (required), timeout (optional, default 120), run_in_background (optional). Use bash_output to monitor and bash_kill to terminate background commands."
 	}
-	return "Execute bash commands in foreground or background. For terminal operations like git, npm, docker. Parameters: command (required), timeout (optional, default 120), run_in_background (optional). Use bash_output to monitor and bash_kill to terminate background commands."
+	return "Execute shell commands in foreground or background. For terminal operations like git, npm, docker. Parameters: command (required), timeout (optional, default 120), run_in_background (optional). Use bash_output to monitor and bash_kill to terminate background commands."
 }
 
 func (t *BashTool) Parameters() map[string]interface{} {
 	return map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
-			"command":            map[string]interface{}{"type": "string", "description": "The shell command to execute."},
-			"timeout":            map[string]interface{}{"type": "integer", "description": "Timeout in seconds (default: 120, max: 600). Only for foreground commands.", "default": 120},
-			"run_in_background":  map[string]interface{}{"type": "boolean", "description": "Set true to run in background. Monitor with bash_output.", "default": false},
+			"command":           map[string]interface{}{"type": "string", "description": "The shell command to execute."},
+			"timeout":           map[string]interface{}{"type": "integer", "description": "Timeout in seconds (default: 120, max: 600). Only for foreground commands.", "default": 120},
+			"run_in_background": map[string]interface{}{"type": "boolean", "description": "Set true to run in background. Monitor with bash_output.", "default": false},
 		},
 		"required": []interface{}{"command"},
 	}
@@ -111,124 +115,50 @@ func (t *BashTool) Execute(ctx context.Context, args map[string]interface{}) (*T
 		}
 	}
 
-	if runtime.GOOS == "windows" {
-		return t.execWindows(ctx, command, timeoutSec, runInBackground)
-	}
-	return t.execUnix(ctx, command, timeoutSec, runInBackground)
-}
+	be := t.resolveBackend()
+	argv := append(append([]string{}, be.Shell()...), command)
 
-func (t *BashTool) execUnix(ctx context.Context, command string, timeoutSec int, background bool) (*ToolResult, error) {
-	timeoutCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(timeoutCtx, "bash", "-c", command)
-	cmd.Dir = t.WorkspaceDir
-
-	if background {
-		bashID := shortID()
-		cmd = exec.Command("bash", "-c", command)
-		cmd.Dir = t.WorkspaceDir
-		stdout, err := cmd.StdoutPipe()
+	if runInBackground {
+		starter, ok := be.(backend.BackgroundStarter)
+		if !ok {
+			return &ToolResult{
+				Success: false,
+				Error:   fmt.Sprintf("backend %q does not support background commands", be.Kind()),
+			}, nil
+		}
+		proc, err := starter.StartBackground(argv, be.Workdir())
 		if err != nil {
 			return &ToolResult{Success: false, Error: err.Error()}, nil
 		}
-		cmd.Stderr = cmd.Stdout
-		if err := cmd.Start(); err != nil {
-			return &ToolResult{Success: false, Error: err.Error()}, nil
-		}
-		shell := &backgroundShell{ID: bashID, Command: command, cmd: cmd}
+		bashID := shortID()
+		shell := &backgroundShell{ID: bashID, Command: command, proc: proc}
 		addBashShell(shell)
 		go func() {
-			sc := bufio.NewScanner(stdout)
-			for sc.Scan() {
-				shell.outputMu.Lock()
-				shell.output = append(shell.output, sc.Text())
-				shell.outputMu.Unlock()
-			}
-			_ = cmd.Wait()
+			<-proc.Done()
 			removeBashShell(bashID)
 		}()
 		msg := fmt.Sprintf("Command started in background. Use bash_output to monitor (bash_id='%s').\n\nCommand: %s\nBash ID: %s", bashID, command, bashID)
 		return &ToolResult{Success: true, Content: msg}, nil
 	}
 
-	out, err := cmd.CombinedOutput()
+	res, err := be.Exec(ctx, argv, backend.ExecOptions{
+		Timeout: time.Duration(timeoutSec) * time.Second,
+	})
 	if err != nil {
-		if ctx.Err() != nil {
-			return &ToolResult{Success: false, Error: ctx.Err().Error()}, nil
-		}
-		exitCode := -1
-		if ee, ok := err.(*exec.ExitError); ok {
-			exitCode = ee.ExitCode()
-		}
-		return &ToolResult{
-			Success: false,
-			Content: string(out),
-			Error:   fmt.Sprintf("Command failed with exit code %d", exitCode),
-		}, nil
+		return &ToolResult{Success: false, Error: err.Error()}, nil
 	}
-	return &ToolResult{Success: true, Content: string(out)}, nil
-}
-
-func (t *BashTool) execWindows(ctx context.Context, command string, timeoutSec int, background bool) (*ToolResult, error) {
-	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-Command", command)
-	cmd.Dir = t.WorkspaceDir
-
-		if background {
-		bashID := shortID()
-		cmd = exec.Command("powershell.exe", "-NoProfile", "-Command", command)
-		cmd.Dir = t.WorkspaceDir
-		stdout, err := cmd.StdoutPipe()
-		if err != nil {
-			return &ToolResult{Success: false, Error: err.Error()}, nil
-		}
-		cmd.Stderr = cmd.Stdout
-		if err := cmd.Start(); err != nil {
-			return &ToolResult{Success: false, Error: err.Error()}, nil
-		}
-		shell := &backgroundShell{ID: bashID, Command: command, cmd: cmd}
-		addBashShell(shell)
-		go func() {
-			sc := bufio.NewScanner(stdout)
-			for sc.Scan() {
-				shell.outputMu.Lock()
-				shell.output = append(shell.output, sc.Text())
-				shell.outputMu.Unlock()
-			}
-			_ = cmd.Wait()
-			removeBashShell(bashID)
-		}()
-		msg := fmt.Sprintf("Command started in background. Use bash_output to monitor (bash_id='%s').\n\nCommand: %s\nBash ID: %s", bashID, command, bashID)
-		return &ToolResult{Success: true, Content: msg}, nil
-	}
-
-	done := make(chan struct{})
-	var out []byte
-	var runErr error
-	go func() {
-		out, runErr = cmd.CombinedOutput()
-		close(done)
-	}()
-	select {
-	case <-ctx.Done():
-		cmd.Process.Kill()
-		return &ToolResult{Success: false, Error: "command cancelled"}, nil
-	case <-time.After(time.Duration(timeoutSec) * time.Second):
-		cmd.Process.Kill()
+	if res.TimedOut {
 		return &ToolResult{Success: false, Error: fmt.Sprintf("Command timed out after %d seconds", timeoutSec)}, nil
-	case <-done:
 	}
-	if runErr != nil {
-		exitCode := -1
-		if ee, ok := runErr.(*exec.ExitError); ok {
-			exitCode = ee.ExitCode()
-		}
+	output := string(res.Stdout) + string(res.Stderr)
+	if !res.OK() {
 		return &ToolResult{
 			Success: false,
-			Content: string(out),
-			Error:   fmt.Sprintf("Command failed with exit code %d", exitCode),
+			Content: output,
+			Error:   fmt.Sprintf("Command failed with exit code %d", res.ExitCode),
 		}, nil
 	}
-	return &ToolResult{Success: true, Content: string(out)}, nil
+	return &ToolResult{Success: true, Content: output}, nil
 }
 
 // BashOutputTool returns output from a background shell.
@@ -264,14 +194,7 @@ func (t *BashOutputTool) Execute(ctx context.Context, args map[string]interface{
 		}
 		return &ToolResult{Success: false, Error: fmt.Sprintf("Shell not found: %s. Available: %s", bashID, avail)}, nil
 	}
-	shell.outputMu.Lock()
-	lines := make([]string, len(shell.output))
-	copy(lines, shell.output)
-	shell.outputMu.Unlock()
-	var out string
-	for _, l := range lines {
-		out += l + "\n"
-	}
+	out := shell.proc.Output()
 	if out == "" {
 		out = "(no output yet)"
 	}
@@ -393,8 +316,8 @@ func (t *BashKillTool) Execute(ctx context.Context, args map[string]interface{})
 	if shell == nil {
 		return &ToolResult{Success: false, Error: "Shell not found: " + bashID}, nil
 	}
-	if shell.cmd != nil && shell.cmd.Process != nil {
-		_ = shell.cmd.Process.Kill()
+	if err := shell.proc.Kill(); err != nil {
+		return &ToolResult{Success: false, Error: "Failed to terminate shell: " + err.Error()}, nil
 	}
 	removeBashShell(bashID)
 	return &ToolResult{Success: true, Content: "Terminated shell " + bashID}, nil

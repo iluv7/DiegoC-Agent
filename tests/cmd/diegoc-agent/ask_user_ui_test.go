@@ -15,6 +15,7 @@ import (
 	"diegoc-agent/internal/logger"
 	"diegoc-agent/internal/schema"
 	"diegoc-agent/internal/tools"
+	"diegoc-agent/internal/workspace"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -108,7 +109,14 @@ func TestQuestionHeaderWrapsChineseAndStripsControls(t *testing.T) {
 }
 
 func TestAskUserRegisteredWithoutOptionalTools(t *testing.T) {
-	list, _ := buildTools(&config.Config{}, t.TempDir())
+	ws := workspace.NewLocal(workspace.LocalOptions{Workdir: t.TempDir()})
+	if err := ws.Initialize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	list, _, err := buildTools(&config.Config{}, ws)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, tool := range list {
 		if tool.Name() == "ask_user" {
 			return

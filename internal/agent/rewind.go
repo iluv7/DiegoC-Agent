@@ -88,8 +88,14 @@ func (a *Agent) trackBefore(tool tools.Tool, args map[string]interface{}) (strin
 	var workspace string
 	switch t := tool.(type) {
 	case *tools.WriteTool:
+		if !t.SupportsHostCheckpoints() {
+			return "", nil
+		}
 		workspace = t.WorkspaceDir
 	case *tools.EditTool:
+		if !t.SupportsHostCheckpoints() {
+			return "", nil
+		}
 		workspace = t.WorkspaceDir
 	default:
 		return "", nil

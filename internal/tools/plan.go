@@ -2,15 +2,17 @@ package tools
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 
+	"diegoc-agent/internal/backend"
 	"diegoc-agent/internal/permission"
 )
 
 // WritePlanTool stores the agent's proposed plan in a dedicated workspace file.
 // It is the only write operation permitted while the agent is in explore mode.
-type WritePlanTool struct{ WorkspaceDir string }
+type WritePlanTool struct {
+	WorkspaceDir string
+	Backend      backend.Backend
+}
 
 func (t *WritePlanTool) Name() string { return "write_plan" }
 func (t *WritePlanTool) Description() string {
@@ -25,13 +27,14 @@ func (t *WritePlanTool) Parameters() map[string]interface{} {
 		"required": []interface{}{"content"},
 	}
 }
-func (t *WritePlanTool) Execute(_ context.Context, args map[string]interface{}) (*ToolResult, error) {
+func (t *WritePlanTool) Execute(ctx context.Context, args map[string]interface{}) (*ToolResult, error) {
 	content, _ := args["content"].(string)
 	if content == "" {
 		return &ToolResult{Success: false, Error: "content is required"}, nil
 	}
-	path := filepath.Join(t.WorkspaceDir, ".agent_plan.md")
-	if err := os.WriteFile(path, []byte(content+"\n"), 0644); err != nil {
+	be := resolveBackend(t.Backend, t.WorkspaceDir)
+	path := be.JoinPath(be.Workdir(), ".agent_plan.md")
+	if err := be.WriteFile(ctx, path, []byte(content+"\n")); err != nil {
 		return &ToolResult{Success: false, Error: err.Error()}, nil
 	}
 	return &ToolResult{Success: true, Content: "Plan saved to .agent_plan.md. Present it to the user and wait for /execute approval before implementation."}, nil

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -39,6 +40,12 @@ type AgentConfig struct {
 type GoalConfig struct {
 	Model     string `yaml:"model"`
 	MaxChecks int    `yaml:"max_checks"`
+}
+
+// WorkspaceConfig selects where tools execute.
+type WorkspaceConfig struct {
+	// Backend is "local": tools run directly on the host.
+	Backend string `yaml:"backend"`
 }
 
 // MCPConfig holds MCP timeout settings.
@@ -77,11 +84,12 @@ type ToolsConfig struct {
 
 // Config is the root configuration.
 type Config struct {
-	LLM    LLMConfig    `yaml:"-"`
-	Agent  AgentConfig  `yaml:"-"`
-	Tools  ToolsConfig  `yaml:"-"`
-	Memory MemoryConfig `yaml:"-"`
-	Goal   GoalConfig   `yaml:"-"`
+	LLM       LLMConfig       `yaml:"-"`
+	Agent     AgentConfig     `yaml:"-"`
+	Tools     ToolsConfig     `yaml:"-"`
+	Memory    MemoryConfig    `yaml:"-"`
+	Goal      GoalConfig      `yaml:"-"`
+	Workspace WorkspaceConfig `yaml:"-"`
 }
 
 // rawConfig is used to parse YAML with flat and nested keys.
@@ -102,6 +110,9 @@ type rawConfig struct {
 	SystemPromptPath string     `yaml:"system_prompt_path"`
 	TokenLimit       int        `yaml:"token_limit"`
 	Goal             GoalConfig `yaml:"goal"`
+	Workspace        struct {
+		Backend string `yaml:"backend"`
+	} `yaml:"workspace"`
 	Memory           struct {
 		Enabled         bool    `yaml:"enabled"`
 		WorkingDir      string  `yaml:"working_dir"`
@@ -232,6 +243,19 @@ func FromYAML(path string) (*Config, error) {
 	if raw.Goal.MaxChecks < 1 || raw.Goal.MaxChecks > 100 {
 		return nil, fmt.Errorf("goal.max_checks must be between 1 and 100")
 	}
+	// Workspace backend defaults and validation.
+	if raw.Workspace.Backend == "" {
+		raw.Workspace.Backend = "local"
+	}
+	raw.Workspace.Backend = strings.ToLower(raw.Workspace.Backend)
+	switch raw.Workspace.Backend {
+	case "local":
+	default:
+		return nil, fmt.Errorf(
+			"workspace.backend must be \"local\", got %q",
+			raw.Workspace.Backend,
+		)
+	}
 	// Memory defaults
 	if raw.Memory.WorkingDir == "" {
 		raw.Memory.WorkingDir = ".reme"
@@ -334,6 +358,9 @@ func FromYAML(path string) (*Config, error) {
 			RetentionDays:   raw.Memory.RetentionDays,
 			ChromaEndpoint:  raw.Memory.ChromaEndpoint,
 			EmbeddingModel:  raw.Memory.EmbeddingModel,
+		},
+		Workspace: WorkspaceConfig{
+			Backend: raw.Workspace.Backend,
 		},
 	}
 	return cfg, nil

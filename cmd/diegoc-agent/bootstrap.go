@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"diegoc-agent/internal/agent"
@@ -14,11 +15,13 @@ import (
 	"diegoc-agent/internal/memory"
 	"diegoc-agent/internal/schema"
 	"diegoc-agent/internal/tools"
+	"diegoc-agent/internal/workspace"
 )
 
 // application owns the components assembled for one CLI process.
 type application struct {
 	agent        *agent.Agent
+	workspace    workspace.Workspace
 	workspaceDir string
 	logger       *logger.AgentLogger
 	memory       *memory.Manager
@@ -28,6 +31,11 @@ func (app *application) Close() {
 	if app.memory != nil {
 		if err := app.memory.Close(); err != nil {
 			fmt.Fprintf(os.Stderr, "Memory shutdown: %v\n", err)
+		}
+	}
+	if app.workspace != nil {
+		if err := app.workspace.Close(context.Background()); err != nil {
+			fmt.Fprintf(os.Stderr, "Workspace shutdown: %v\n", err)
 		}
 	}
 }
@@ -72,7 +80,27 @@ func buildApplication(cfg *config.Config, workspaceOverride string) (*applicatio
 		return nil, fmt.Errorf("Workspace error: %w", err)
 	}
 
-	toolList, skillLoader := buildTools(cfg, workspaceDir)
+	// The workspace owns the execution environment and the builtin tools
+	// bound to it. Initialize is idempotent and must succeed before any
+	// tool can resolve paths.
+	ws, err := buildWorkspace(cfg, workspaceDir)
+	if err != nil {
+		return nil, fmt.Errorf("Workspace error: %w", err)
+	}
+	if err := ws.Initialize(context.Background()); err != nil {
+		return nil, fmt.Errorf("Workspace error: %w", err)
+	}
+	initialized := false
+	defer func() {
+		if !initialized {
+			_ = ws.Close(context.Background())
+		}
+	}()
+
+	toolList, skillLoader, err := buildTools(cfg, ws)
+	if err != nil {
+		return nil, fmt.Errorf("Tools error: %w", err)
+	}
 	var skillsMetadata string
 	if skillLoader != nil {
 		skillsMetadata = skillLoader.GetSkillsMetadataPrompt()
@@ -80,6 +108,9 @@ func buildApplication(cfg *config.Config, workspaceOverride string) (*applicatio
 	systemPrompt, instructionsPath, err := buildSystemPrompt(systemPrompt, workspaceDir, skillsMetadata)
 	if err != nil {
 		return nil, fmt.Errorf("Project instructions error: %w", err)
+	}
+	if ws.Instructions() != "" {
+		systemPrompt += "\n\n" + ws.Instructions() + "\n"
 	}
 	if instructionsPath != "" {
 		fmt.Printf("Loaded project instructions: %s\n", selectorText(instructionsPath, 10000))
@@ -131,35 +162,44 @@ func buildApplication(cfg *config.Config, workspaceOverride string) (*applicatio
 		ag.SetMemoryManager(memManager)
 	}
 
-	return &application{agent: ag, workspaceDir: workspaceDir, logger: agentLogger, memory: memManager}, nil
+	initialized = true
+	return &application{
+		agent:        ag,
+		workspace:    ws,
+		workspaceDir: workspaceDir,
+		logger:       agentLogger,
+		memory:       memManager,
+	}, nil
 }
 
-func buildTools(cfg *config.Config, workspaceDir string) ([]tools.Tool, *tools.SkillLoader) {
+// buildWorkspace selects the execution environment from configuration.
+func buildWorkspace(cfg *config.Config, workspaceDir string) (workspace.Workspace, error) {
+	switch strings.ToLower(cfg.Workspace.Backend) {
+	case "", "local":
+		return workspace.NewLocal(workspace.LocalOptions{
+			ID:      "local",
+			Workdir: workspaceDir,
+		}), nil
+	default:
+		return nil, fmt.Errorf("unsupported workspace backend %q", cfg.Workspace.Backend)
+	}
+}
+
+func buildTools(cfg *config.Config, ws workspace.Workspace) ([]tools.Tool, *tools.SkillLoader, error) {
+	workspaceTools, err := ws.ListTools(workspace.ToolOptions{
+		FileTools: cfg.Tools.EnableFileTools,
+		Bash:      cfg.Tools.EnableBash,
+		Plan:      true,
+		Notes:     cfg.Tools.EnableNote,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+
 	list := append([]tools.Tool{&tools.AskUserTool{}}, tools.LoopTools()...)
+	list = append(list, workspaceTools...)
 	var skillLoader *tools.SkillLoader
 
-	if cfg.Tools.EnableFileTools {
-		list = append(list,
-			&tools.ReadTool{WorkspaceDir: workspaceDir},
-			&tools.WriteTool{WorkspaceDir: workspaceDir},
-			&tools.EditTool{WorkspaceDir: workspaceDir},
-		)
-	}
-	list = append(list, &tools.WritePlanTool{WorkspaceDir: workspaceDir})
-	if cfg.Tools.EnableBash {
-		list = append(list,
-			&tools.BashTool{WorkspaceDir: workspaceDir},
-			&tools.BashOutputTool{},
-			&tools.BashKillTool{},
-		)
-	}
-	if cfg.Tools.EnableNote {
-		memoryFile := filepath.Join(workspaceDir, ".agent_memory.json")
-		list = append(list,
-			&tools.RecordNoteTool{MemoryFile: memoryFile},
-			&tools.RecallNoteTool{MemoryFile: memoryFile},
-		)
-	}
 	if cfg.Tools.EnableSkills {
 		skillsDir := resolveSkillsDir(cfg.Tools.SkillsDir)
 		loader := tools.NewSkillLoader(skillsDir)
@@ -182,7 +222,7 @@ func buildTools(cfg *config.Config, workspaceDir string) ([]tools.Tool, *tools.S
 			}
 		}
 	}
-	return list, skillLoader
+	return list, skillLoader, nil
 }
 
 // buildMemoryFileStore constructs the Phase 9-10 memory index stack:

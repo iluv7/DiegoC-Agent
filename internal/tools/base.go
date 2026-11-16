@@ -7,9 +7,9 @@ import (
 
 // ToolResult 是工具执行的输出。
 type ToolResult struct {
-	Success bool   `json:"success"`           // 是否成功
-	Content string `json:"content"`           // 输出内容
-	Error   string `json:"error,omitempty"`   // 错误信息
+	Success bool   `json:"success"`         // 是否成功
+	Content string `json:"content"`         // 输出内容
+	Error   string `json:"error,omitempty"` // 错误信息
 }
 
 // Tool 是所有工具必须实现的接口。

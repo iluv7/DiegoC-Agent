@@ -3,18 +3,20 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	"io/fs"
 	"sync"
 	"time"
 
+	"diegoc-agent/internal/backend"
 	"diegoc-agent/internal/permission"
 )
 
 // RecordNoteTool records a session note to a JSON file.
 type RecordNoteTool struct {
 	MemoryFile string
+	Backend    backend.Backend
 	mu         sync.Mutex
 }
 
@@ -35,10 +37,20 @@ func (t *RecordNoteTool) Parameters() map[string]interface{} {
 	}
 }
 
-func (t *RecordNoteTool) loadNotes() ([]map[string]interface{}, error) {
-	data, err := os.ReadFile(t.MemoryFile)
+// notePath resolves the notes file: an explicit MemoryFile wins, otherwise
+// the workspace's canonical .agent_memory.json.
+func notePath(memoryFile string, be backend.Backend) string {
+	if memoryFile != "" {
+		return memoryFile
+	}
+	return be.JoinPath(be.Workdir(), ".agent_memory.json")
+}
+
+func (t *RecordNoteTool) loadNotes(ctx context.Context) ([]map[string]interface{}, error) {
+	be := resolveBackend(t.Backend, "")
+	data, err := be.ReadFile(ctx, notePath(t.MemoryFile, be))
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
@@ -50,15 +62,13 @@ func (t *RecordNoteTool) loadNotes() ([]map[string]interface{}, error) {
 	return notes, nil
 }
 
-func (t *RecordNoteTool) saveNotes(notes []map[string]interface{}) error {
-	if err := os.MkdirAll(filepath.Dir(t.MemoryFile), 0755); err != nil {
-		return err
-	}
+func (t *RecordNoteTool) saveNotes(ctx context.Context, notes []map[string]interface{}) error {
 	data, err := json.MarshalIndent(notes, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(t.MemoryFile, data, 0644)
+	be := resolveBackend(t.Backend, "")
+	return be.WriteFile(ctx, notePath(t.MemoryFile, be), data)
 }
 
 func (t *RecordNoteTool) Execute(ctx context.Context, args map[string]interface{}) (*ToolResult, error) {
@@ -72,7 +82,7 @@ func (t *RecordNoteTool) Execute(ctx context.Context, args map[string]interface{
 	if content == "" {
 		return &ToolResult{Success: false, Error: "content is required"}, nil
 	}
-	notes, err := t.loadNotes()
+	notes, err := t.loadNotes(ctx)
 	if err != nil {
 		return &ToolResult{Success: false, Error: "Failed to load notes: " + err.Error()}, nil
 	}
@@ -84,7 +94,7 @@ func (t *RecordNoteTool) Execute(ctx context.Context, args map[string]interface{
 		"category":  category,
 		"content":   content,
 	})
-	if err := t.saveNotes(notes); err != nil {
+	if err := t.saveNotes(ctx, notes); err != nil {
 		return &ToolResult{Success: false, Error: "Failed to record note: " + err.Error()}, nil
 	}
 	return &ToolResult{Success: true, Content: "Recorded note: " + content + " (category: " + category + ")"}, nil
@@ -93,6 +103,7 @@ func (t *RecordNoteTool) Execute(ctx context.Context, args map[string]interface{
 // RecallNoteTool recalls session notes from the same JSON file.
 type RecallNoteTool struct {
 	MemoryFile string
+	Backend    backend.Backend
 }
 
 func (t *RecallNoteTool) Name() string { return "recall_notes" }
@@ -127,9 +138,10 @@ func (t *RecallNoteTool) IsReadOnly() bool        { return true }
 func (t *RecallNoteTool) IsExternalTool() bool    { return false }
 
 func (t *RecallNoteTool) Execute(ctx context.Context, args map[string]interface{}) (*ToolResult, error) {
-	data, err := os.ReadFile(t.MemoryFile)
+	be := resolveBackend(t.Backend, "")
+	data, err := be.ReadFile(ctx, notePath(t.MemoryFile, be))
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return &ToolResult{Success: true, Content: "No notes recorded yet."}, nil
 		}
 		return &ToolResult{Success: false, Error: err.Error()}, nil

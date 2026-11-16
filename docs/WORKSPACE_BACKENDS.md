@@ -65,6 +65,8 @@ WriteFile(ctx, path string, data []byte) error
 已实现的后端：
 
 - `LocalBackend`：宿主机，原生 `os.*` 覆盖多数派生方法，支持后台进程。
+- `DockerBackend`：通过 `docker exec` / `cat` / 标准输入写文件；路径语义固定
+  为 POSIX。`HostPaths()` 表示容器工作区是否是宿主机路径的 bind mount。
 
 新增一个后端只需要：
 
@@ -95,10 +97,13 @@ Provision(ctx) (backend.Backend, error)  // 创建/连接环境，返回 backend
 Teardown(ctx) error                      // 释放环境
 ```
 
-`LocalWorkspace` 在宿主机目录上绑定 `LocalBackend`。未来接入容器或远端
-沙箱时，工作区子类负责环境的创建/连接，并把 backend 的工作目录暴露给
-工具即可；若文件不再位于宿主机，应把 `HostPaths()` 设为 `false`，这样
-rewind 等依赖宿主路径的功能会自动跳过。
+`LocalWorkspace` 在宿主机目录上绑定 `LocalBackend`；`DockerWorkspace`
+负责容器的 inspect / run / start / rm，并把工作区以**同路径 bind mount**
+挂进容器，因此：
+
+- 系统提示里的工作区路径在容器内外一致；
+- `AGENTS.md`、`.agent_plan.md`、笔记文件等仍然直接可见；
+- 未来接入真正隔离的远端沙箱时，只需把 `HostPaths` 设为 `false`。
 
 工具通过 `workspace.ListTools` 获得 backend，例如：
 
@@ -117,13 +122,23 @@ rewind 等依赖宿主路径的功能会自动跳过。
 
 ```yaml
 workspace:
-  backend: "local"   # 目前仅 local；容器/远端后端在其上扩展
+  backend: "local"          # local | docker
+  docker:
+    container: "diegoc-agent-workspace"
+    image: "debian:bookworm-slim"
+    remove_on_close: false  # 默认保留容器，下次运行直接复用
 ```
 
 - `backend: local`：与之前行为一致，直接在宿主机执行。
+- `backend: docker`：首次运行创建容器并在其中执行命令；工作区目录以相同
+  绝对路径 mount 进容器。`remove_on_close: true` 时退出会 `docker rm -f`。
+- Docker 后端目前不支持 Windows 宿主（同路径 bind mount 不成立）。
 
 ## 已知边界
 
+- `docker` 后端使用 `sh -c`（镜像保证有 `/bin/sh`）；依赖 bash 扩展语法的
+  命令请显式调用 `bash -c`，或把镜像换成带 bash 的基础镜像。
 - 后台命令、rewind 快照依赖 backend 能力：后台需要
   `BackgroundStarter`，快照需要 `HostPaths() == true`，否则 rewind 会跳过。
-- 容器/远端后端尚未实现；按上面的 3 个原语补齐即可，工作区层无需改动。
+- 远端后端（K8s / 云沙箱）尚未实现；按上面的 3 个原语补齐即可，工作区层
+  无需改动。

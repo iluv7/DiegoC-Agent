@@ -180,6 +180,13 @@ func buildWorkspace(cfg *config.Config, workspaceDir string) (workspace.Workspac
 			ID:      "local",
 			Workdir: workspaceDir,
 		}), nil
+	case "docker":
+		return workspace.NewDocker(workspace.DockerOptions{
+			Container:     cfg.Workspace.Docker.Container,
+			Image:         cfg.Workspace.Docker.Image,
+			Workdir:       workspaceDir,
+			RemoveOnClose: cfg.Workspace.Docker.RemoveOnClose,
+		}), nil
 	default:
 		return nil, fmt.Errorf("unsupported workspace backend %q", cfg.Workspace.Backend)
 	}
